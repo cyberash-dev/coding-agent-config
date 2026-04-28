@@ -220,7 +220,7 @@ install_codex() {
   local args=()
   [[ -n "$VCS" ]] && args+=(--vcs "$VCS")
   [[ "$YANDEX" -eq 1 ]] && args+=(--yandex)
-  "$REPO_ROOT/scripts/build.sh" "${args[@]}"
+  "$REPO_ROOT/scripts/build.sh" ${args[@]+"${args[@]}"}
   link "$REPO_ROOT/build/AGENTS.md" "$HOME/.codex/AGENTS.md"
 }
 
