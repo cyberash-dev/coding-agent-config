@@ -33,6 +33,20 @@ When your changes create orphans:
 
 Test: every changed line should trace directly to the user's request.
 
+## Self-Documenting Code
+Code should explain itself through clear names and structure. Comments are a
+last resort, not a default.
+- No comments that describe WHAT the code does — well-named identifiers do that.
+- No comments restating the obvious, marking sections, or narrating changes
+  ("added for X", "used by Y", "fixes bug Z") — that belongs in commit messages.
+- No docstrings or block comments on trivial functions.
+- If a comment feels needed, first try: better name, smaller function,
+  extracted variable. Comment only if those don't resolve the confusion.
+
+Leave a comment ONLY for genuinely non-obvious WHY: a hidden constraint,
+a subtle invariant, a workaround for a specific external bug, behavior that
+would surprise a careful reader. When in doubt — don't.
+
 ## Goal-Driven Execution
 Define success criteria. Loop until verified.
 
