@@ -195,6 +195,20 @@ install_hook() {
   echo "  + hook $event${matcher:+ ($matcher)} -> $script"
 }
 
+# Symlink each repo skill into <target_root>/<name> so user-owned skills with
+# different names coexist. Same-name collisions are backed up by link().
+install_skills() {
+  local target_root="$1"
+  [[ -d "$REPO_ROOT/skills" ]] || return 0
+  local src
+  for src in "$REPO_ROOT"/skills/*/; do
+    [[ -d "$src" ]] || continue
+    local name
+    name="$(basename "$src")"
+    link "${src%/}" "$target_root/$name"
+  done
+}
+
 install_claude() {
   echo "[claude]"
   write_generated "$HOME/.claude/CLAUDE.md" "$(build_claude_md)"
@@ -206,6 +220,7 @@ install_claude() {
   if [[ "$YANDEX" -eq 1 ]]; then
     link "$REPO_ROOT/yandex" "$HOME/.claude/yandex"
   fi
+  install_skills "$HOME/.claude/skills"
 
   # Register hooks idempotently.
   install_hook "$HOME/.claude/hooks/lsp-reminder.sh" "Grep|Read" "PreToolUse"
@@ -222,6 +237,7 @@ install_codex() {
   [[ "$YANDEX" -eq 1 ]] && args+=(--yandex)
   "$REPO_ROOT/scripts/build.sh" ${args[@]+"${args[@]}"}
   link "$REPO_ROOT/build/AGENTS.md" "$HOME/.codex/AGENTS.md"
+  install_skills "$HOME/.codex/skills"
 }
 
 case "$MODE" in

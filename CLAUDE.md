@@ -14,6 +14,7 @@ Rules are split by topic across files in `~/.claude/rules/`. Each file is pulled
 
 ## Process
 - @rules/workflow.md — spec-first development, task steps
+- @rules/spec-driven-development.md — spec as single source of truth: templates, lifecycle, three gates, brownfield rules, stop conditions
 - @rules/commits.md — commit message format, granularity, no AI attribution
 - @rules/coding-discipline.md — think-before-coding, simplicity, surgical changes, goal-driven execution
 

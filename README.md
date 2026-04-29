@@ -18,6 +18,7 @@ agent and registers hooks in `~/.claude/settings.json`.
 │   ├── refs/           #   long reference docs (lazy-loaded by path)
 │   └── hooks/          #   yandex-specific hook scripts
 ├── hooks/              # hooks installed unconditionally
+├── skills/             # SKILL.md bundles, symlinked per-skill into both agents
 ├── build/              # generated, gitignored
 │   └── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
 └── scripts/
@@ -41,6 +42,10 @@ agent and registers hooks in `~/.claude/settings.json`.
   (currently `lsp-reminder.sh`).
 - **`yandex/hooks/`** — hook scripts installed only with `--yandex`
   (currently `block-arcadia-broad-search.sh`).
+- **`skills/`** — SKILL.md bundles (open standard, supported by both Claude Code
+  and Codex CLI). Each subdir is one skill and gets symlinked **per-skill** into
+  `~/.claude/skills/<name>` and `~/.codex/skills/<name>`, so the user's own
+  hand-rolled skills in those directories are left untouched.
 
 `CLAUDE.md` is intentionally tiny — a table of contents that Claude Code
 expands at session start via `@rules/X.md` imports. Codex does not
@@ -76,7 +81,9 @@ cd ~/Projects/coding-agent-config
 | Claude Code | `~/.claude/vcs` (symlink, with `--vcs`)     | `vcs/`                                     |
 | Claude Code | `~/.claude/yandex` (symlink, with `--yandex`)| `yandex/`                                 |
 | Claude Code | `~/.claude/settings.json` (mutated)         | hook entries idempotently upserted         |
+| Claude Code | `~/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`                         |
 | Codex CLI   | `~/.codex/AGENTS.md` (symlink)              | `build/AGENTS.md`                          |
+| Codex CLI   | `~/.codex/skills/<name>` (symlink per skill)  | `skills/<name>/`                         |
 
 If anything already exists at a target path it is renamed to
 `<target>.bak.<unix-timestamp>` before the symlink/file is created.
@@ -133,6 +140,17 @@ swap `vcs/arc.md`), re-run `./scripts/install.sh claude --yandex` so
   them in `yandex/refs/` and reference them by path from a top-level
   `yandex/<topic>.md` pointer file.
 
+## Adding a new skill
+
+Drop `skills/<name>/SKILL.md` (plus any supporting files) into the repo, then
+re-run `./scripts/install.sh all`. Per-skill symlinks land in
+`~/.claude/skills/<name>` and `~/.codex/skills/<name>`. Skills are
+auto-discovered from `skills/*/` — no flag, no list to maintain.
+
+User-owned skills with different names (e.g. `~/.claude/skills/my-thing/`)
+are untouched. A same-name collision is backed up to
+`<target>.bak.<unix-timestamp>` like every other install target.
+
 ## Adding a new hook
 
 - Universal hook: drop `hooks/<name>.sh`, then add an `install_hook`
@@ -145,8 +163,10 @@ prior entry that points at a script with the same basename.
 
 ## Out of scope
 
-- `~/.claude/agents/`, `~/.claude/commands/`, `~/.claude/skills/`,
+- `~/.claude/agents/`, `~/.claude/commands/`,
   `~/.claude/projects/*/memory/` — not managed by this repo.
+- Skills you authored yourself in `~/.claude/skills/` or `~/.codex/skills/` —
+  install.sh only touches subdirs that match a name in this repo's `skills/`.
 - `~/.codex/config.toml` — not managed.
 - Permissions in `~/.claude/settings.json` (`allow`/`deny`/`ask`) —
   install.sh only mutates the `hooks` block; everything else is left
