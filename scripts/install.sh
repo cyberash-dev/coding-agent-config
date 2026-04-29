@@ -27,7 +27,8 @@ Usage: $0 <claude|codex|all> [--vcs <name>] [--yandex]
 
   claude   generate ~/.claude/CLAUDE.md, symlink ~/.claude/rules and
            ~/.claude/hooks (and ~/.claude/vcs, ~/.claude/yandex when set)
-  codex    build AGENTS.md and symlink ~/.codex/AGENTS.md
+  codex    build AGENTS.md, symlink ${CODEX_HOME:-~/.codex}/AGENTS.md,
+           and symlink skills into ~/.agents/skills
   all      both
 
   --vcs <name>   bundle vcs/<name>.md (e.g. arc). Omit for plain git.
@@ -68,6 +69,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TS="$(date +%s)"
 SETTINGS="$HOME/.claude/settings.json"
 SETTINGS_BACKED_UP=0
+CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
 
 if [[ -n "$VCS" && ! -f "$REPO_ROOT/vcs/$VCS.md" ]]; then
   echo "install.sh: vcs/$VCS.md not found in repo" >&2
@@ -209,6 +211,29 @@ install_skills() {
   done
 }
 
+cleanup_legacy_codex_skills() {
+  local legacy_root="$HOME/.codex/skills"
+  [[ -d "$legacy_root" ]] || return 0
+  [[ -d "$REPO_ROOT/skills" ]] || return 0
+
+  local src
+  for src in "$REPO_ROOT"/skills/*/; do
+    [[ -d "$src" ]] || continue
+    local name legacy
+    name="$(basename "$src")"
+    legacy="$legacy_root/$name"
+
+    if [[ ! -L "$legacy" ]]; then
+      continue
+    fi
+
+    rm "$legacy"
+    echo "  - removed legacy Codex skill $legacy"
+  done
+
+  rmdir "$legacy_root" 2>/dev/null || true
+}
+
 install_claude() {
   echo "[claude]"
   write_generated "$HOME/.claude/CLAUDE.md" "$(build_claude_md)"
@@ -236,8 +261,9 @@ install_codex() {
   [[ -n "$VCS" ]] && args+=(--vcs "$VCS")
   [[ "$YANDEX" -eq 1 ]] && args+=(--yandex)
   "$REPO_ROOT/scripts/build.sh" ${args[@]+"${args[@]}"}
-  link "$REPO_ROOT/build/AGENTS.md" "$HOME/.codex/AGENTS.md"
-  install_skills "$HOME/.codex/skills"
+  link "$REPO_ROOT/build/AGENTS.md" "$CODEX_CONFIG_DIR/AGENTS.md"
+  install_skills "$HOME/.agents/skills"
+  cleanup_legacy_codex_skills
 }
 
 case "$MODE" in

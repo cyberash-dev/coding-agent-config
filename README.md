@@ -1,6 +1,6 @@
 # coding-agent-config
 
-Portable coding-agent setup for Claude Code and Codex CLI on macOS.
+Portable coding-agent setup for Claude Code and Codex CLI / IDE on macOS.
 
 Single source of truth for rules, hooks, and tool-specific guidance;
 one script symlinks them into the per-user config locations of each
@@ -23,7 +23,7 @@ agent and registers hooks in `~/.claude/settings.json`.
 │   └── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
 └── scripts/
     ├── build.sh        # rebuild build/AGENTS.md
-    └── install.sh      # symlink into ~/.claude and/or ~/.codex
+    └── install.sh      # symlink into Claude/Codex config locations
 ```
 
 ### What's where, and why
@@ -43,9 +43,10 @@ agent and registers hooks in `~/.claude/settings.json`.
 - **`yandex/hooks/`** — hook scripts installed only with `--yandex`
   (currently `block-arcadia-broad-search.sh`).
 - **`skills/`** — SKILL.md bundles (open standard, supported by both Claude Code
-  and Codex CLI). Each subdir is one skill and gets symlinked **per-skill** into
-  `~/.claude/skills/<name>` and `~/.codex/skills/<name>`, so the user's own
-  hand-rolled skills in those directories are left untouched.
+  and Codex CLI / IDE). Each subdir is one skill and gets symlinked
+  **per-skill** into `~/.claude/skills/<name>` and
+  `~/.agents/skills/<name>`, so the user's own hand-rolled skills in those
+  directories are left untouched.
 
 `CLAUDE.md` is intentionally tiny — a table of contents that Claude Code
 expands at session start via `@rules/X.md` imports. Codex does not
@@ -82,8 +83,8 @@ cd ~/Projects/coding-agent-config
 | Claude Code | `~/.claude/yandex` (symlink, with `--yandex`)| `yandex/`                                 |
 | Claude Code | `~/.claude/settings.json` (mutated)         | hook entries idempotently upserted         |
 | Claude Code | `~/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`                         |
-| Codex CLI   | `~/.codex/AGENTS.md` (symlink)              | `build/AGENTS.md`                          |
-| Codex CLI   | `~/.codex/skills/<name>` (symlink per skill)  | `skills/<name>/`                         |
+| Codex CLI / IDE | `${CODEX_HOME:-~/.codex}/AGENTS.md` (symlink) | `build/AGENTS.md`                    |
+| Codex CLI / IDE | `~/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`                    |
 
 If anything already exists at a target path it is renamed to
 `<target>.bak.<unix-timestamp>` before the symlink/file is created.
@@ -91,6 +92,13 @@ If anything already exists at a target path it is renamed to
 `~/.claude/CLAUDE.md` and `~/.claude/settings.json` are **regenerated on
 every run** (so flag changes take effect). All other targets are
 symlinks — re-running with the same flags is a no-op (`= already linked`).
+
+If an older install created repo-owned skill symlinks under
+`~/.codex/skills/<name>`, `install.sh codex` removes those legacy symlinks
+after installing the replacement under `~/.agents/skills/<name>`. It only
+removes same-name symlinks for skills managed by this repo; unrelated files
+and directories are left untouched. If `~/.codex/skills` becomes empty, the
+legacy directory is removed too.
 
 ### Hooks
 
@@ -144,7 +152,7 @@ swap `vcs/arc.md`), re-run `./scripts/install.sh claude --yandex` so
 
 Drop `skills/<name>/SKILL.md` (plus any supporting files) into the repo, then
 re-run `./scripts/install.sh all`. Per-skill symlinks land in
-`~/.claude/skills/<name>` and `~/.codex/skills/<name>`. Skills are
+`~/.claude/skills/<name>` and `~/.agents/skills/<name>`. Skills are
 auto-discovered from `skills/*/` — no flag, no list to maintain.
 
 User-owned skills with different names (e.g. `~/.claude/skills/my-thing/`)
@@ -165,7 +173,7 @@ prior entry that points at a script with the same basename.
 
 - `~/.claude/agents/`, `~/.claude/commands/`,
   `~/.claude/projects/*/memory/` — not managed by this repo.
-- Skills you authored yourself in `~/.claude/skills/` or `~/.codex/skills/` —
+- Skills you authored yourself in `~/.claude/skills/` or `~/.agents/skills/` —
   install.sh only touches subdirs that match a name in this repo's `skills/`.
 - `~/.codex/config.toml` — not managed.
 - Permissions in `~/.claude/settings.json` (`allow`/`deny`/`ask`) —
