@@ -1,0 +1,22 @@
+{
+  "version": "1.0.0",
+  "absolute": [
+    "возможно",
+    "вероятно",
+    "обычно",
+    "as a rule",
+    "etc.",
+    "and so on",
+    "should usually",
+    "similar to",
+    "approximately",
+    "best-effort",
+    "best effort",
+    "informally"
+  ],
+  "modal_in_normative": [
+    "may be",
+    "might be"
+  ],
+  "notes": "Absolute words: blocked in any normative section (NORMATIVE_SECTIONS). Modal phrases: blocked only in template fields marked is_normative=true (see TemplateFieldMetadata.IS_NORMATIVE in @cyberash/sdd-cli); allowed in Context/Glossary/comments and in Scenario prose with explicit options. List is byte-equivalent with @cyberash/sdd-cli@1.0.0 src/shared/domain/WeaselWords.ts; CLI's tests/unit/weasel-words-sync.test.ts asserts the equivalence. Expanding (e.g. adding 'as needed', 'where appropriate', singletons 'may'/'might') requires a coordinated PR in both repos plus a minor bump on @cyberash/sdd-cli/diagnostics."
+}
