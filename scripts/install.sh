@@ -4,17 +4,14 @@
 #
 # Usage: install.sh <claude|codex|all> [--sdd]
 #
-# --sdd   Bundle all `sdd/*.md` files (Spec-Driven Development methodology,
-#         enforcement registry, sdd-cli usage), register the sdd-lint
-#         reminder hook, and install the spec-driven-development skill.
-#         Without the flag, every previously installed SDD artefact owned
-#         by this repo is removed (hook entry, ~/.claude/sdd symlink,
-#         spec-driven-development skill symlinks).
+# --sdd   Fetch the sdd-cli submodule (Spec-Driven Development tooling),
+#         `npm install` + `npm run build` + `npm link` it so the `sdd` bin
+#         lands on PATH, then run `sdd install <mode>`. sdd-cli installs its
+#         own rules, skill, and hooks for the chosen target(s).
 #
-# Hooks: install.sh always installs hooks from `hooks/`; --sdd additionally
-# installs hooks from `sdd/hooks/`. Hook registration in settings.json is
-# idempotent — entries pointing at the canonical paths are upserted, stale
-# entries with the same script basename are removed.
+# Hooks: install.sh always installs hooks from `hooks/`. Hook registration
+# in settings.json is idempotent — entries pointing at the canonical paths
+# are upserted, stale entries with the same script basename are removed.
 #
 # Existing files at target paths are renamed to <target>.bak.<unix-timestamp>.
 #
@@ -34,14 +31,14 @@ usage() {
 Usage: $0 <claude|codex|all> [--sdd]
 
   claude   generate ~/.claude/CLAUDE.md, symlink ~/.claude/rules and
-           ~/.claude/hooks (and ~/.claude/sdd when set)
+           ~/.claude/hooks
   codex    build AGENTS.md, symlink ${CODEX_HOME:-~/.codex}/AGENTS.md,
            and symlink skills into ~/.agents/skills
   all      both
 
-  --sdd    bundle sdd/*.md, the sdd-lint hook, and the
-           spec-driven-development skill. Without the flag any
-           previously installed SDD artefact is removed.
+  --sdd    fetch the sdd-cli submodule, npm install + build + link it,
+           then run \`sdd install <mode>\` so sdd-cli installs its own
+           SDD rules, skill, and hooks.
 EOF
   exit 2
 }
@@ -62,10 +59,14 @@ done
 
 CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
 
-if [[ "$SDD" -eq 1 && ! -d "$REPO_ROOT/sdd" ]]; then
-  echo "install.sh: sdd/ directory not found in repo" >&2
-  exit 1
-fi
+# Fetch and build the sdd-cli submodule, then link its `sdd` bin onto PATH.
+ensure_sdd_cli() {
+  echo "[sdd-cli]"
+  git -C "$REPO_ROOT" submodule update --init --recursive sdd-cli
+  ( cd "$REPO_ROOT/sdd-cli" && npm install && npm run build && npm link )
+  command -v sdd >/dev/null 2>&1 \
+    || echo "  ! sdd not on PATH after npm link" >&2
+}
 
 # MCP servers referenced by core rules (rules/code-navigation.md → code-skeleton).
 # Each entry is registered in ~/.claude.json or ~/.codex/config.toml depending
@@ -95,70 +96,52 @@ register_core_mcp_codex() {
   register_mcp_codex "code-skeleton" "$cs_bin" "[]" "{}"
 }
 
-build_claude_md() {
-  local body
-  body="$(cat "$REPO_ROOT/CLAUDE.md")"
-  if [[ "$SDD" -eq 1 ]]; then
-    body+=$'\n\n## SDD\n'
-    while IFS= read -r path; do
-      local rel="sdd/$(basename "$path")"
-      body+="- @$rel"$'\n'
-    done < <(find "$REPO_ROOT/sdd" -maxdepth 1 -type f -name '*.md' | sort)
-  fi
-  printf '%s' "$body"
-}
-
 install_claude() {
   echo "[claude]"
-  write_generated "$HOME/.claude/CLAUDE.md" "$(build_claude_md)"
+  write_generated "$HOME/.claude/CLAUDE.md" "$(cat "$REPO_ROOT/CLAUDE.md")"
   link "$REPO_ROOT/rules" "$HOME/.claude/rules"
   link "$REPO_ROOT/hooks" "$HOME/.claude/hooks"
-  if [[ "$SDD" -eq 1 ]]; then
-    link "$REPO_ROOT/sdd" "$HOME/.claude/sdd"
-  fi
   install_skills "$REPO_ROOT/skills" "$HOME/.claude/skills"
-  if [[ "$SDD" -eq 1 ]]; then
-    install_skills "$REPO_ROOT/sdd/skills" "$HOME/.claude/skills"
-  else
-    unlink_if_repo_owned "$HOME/.claude/sdd" "$REPO_ROOT/sdd"
-    unlink_if_repo_owned "$HOME/.claude/skills/spec-driven-development" \
-      "$REPO_ROOT/sdd/skills/spec-driven-development"
-  fi
 
   install_hook "$HOME/.claude/hooks/lsp-reminder.sh" "Grep|Read" "PreToolUse"
-  if [[ "$SDD" -eq 1 ]]; then
-    install_hook "$HOME/.claude/sdd/hooks/sdd-lint-reminder.sh" \
-      "Edit|Write|MultiEdit" "PreToolUse"
-  else
-    remove_hook "sdd-lint-reminder.sh" "PreToolUse"
-  fi
 
   register_core_mcp_claude
 }
 
 install_codex() {
   echo "[codex]"
-  local args=()
-  [[ "$SDD" -eq 1 ]] && args+=(--sdd)
-  "$REPO_ROOT/scripts/build.sh" ${args[@]+"${args[@]}"}
+  "$REPO_ROOT/scripts/build.sh"
   link "$REPO_ROOT/build/AGENTS.md" "$CODEX_CONFIG_DIR/AGENTS.md"
   install_skills "$REPO_ROOT/skills" "$HOME/.agents/skills"
-  if [[ "$SDD" -eq 1 ]]; then
-    install_skills "$REPO_ROOT/sdd/skills" "$HOME/.agents/skills"
-  else
-    unlink_if_repo_owned "$HOME/.agents/skills/spec-driven-development" \
-      "$REPO_ROOT/sdd/skills/spec-driven-development"
-  fi
-  cleanup_legacy_codex_skills "$REPO_ROOT/skills" "$REPO_ROOT/sdd/skills"
+  cleanup_legacy_codex_skills "$REPO_ROOT/skills"
 
   register_core_mcp_codex
 }
 
 case "$MODE" in
-  claude) ensure_core_mcp_packages; install_claude ;;
-  codex)  ensure_core_mcp_packages; install_codex ;;
-  all)    ensure_core_mcp_packages; install_claude; install_codex ;;
-  *)      usage ;;
+  claude|codex|all) ensure_core_mcp_packages ;;
+  *)                usage ;;
 esac
+
+if [[ "$SDD" -eq 1 ]]; then
+  ensure_sdd_cli
+fi
+
+case "$MODE" in
+  claude) install_claude ;;
+  codex)  install_codex ;;
+  all)    install_claude; install_codex ;;
+esac
+
+# sdd-cli writes its own rules/skill/hooks into the target config(s); run it
+# last so build.sh's regeneration of build/AGENTS.md happens before sdd-cli
+# appends to the symlinked ~/.codex/AGENTS.md.
+if [[ "$SDD" -eq 1 ]]; then
+  if command -v sdd >/dev/null 2>&1; then
+    sdd install "$MODE"
+  else
+    echo "install.sh: sdd not on PATH; skipping 'sdd install $MODE'" >&2
+  fi
+fi
 
 echo "install.sh: done."

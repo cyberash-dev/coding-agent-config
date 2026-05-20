@@ -1,0 +1,3 @@
+[submodule "sdd-cli"]
+	path = sdd-cli
+	url = https://github.com/cyberash-dev/sdd-cli

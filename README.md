@@ -2,10 +2,11 @@
 
 Portable coding-agent setup for Claude Code and Codex CLI / IDE on macOS.
 
-Single source of truth for universal coding rules, hooks, and the optional
-Spec-Driven Development bundle. One script symlinks them into the per-user
-config locations of each agent and registers hooks in
-`~/.claude/settings.json`.
+Single source of truth for universal coding rules and hooks. One script
+symlinks them into the per-user config locations of each agent and registers
+hooks in `~/.claude/settings.json`. The optional `--sdd` flag delegates
+Spec-Driven Development setup to [sdd-cli](https://github.com/cyberash-dev/sdd-cli),
+embedded here as a git submodule.
 
 This repo is intentionally project-, vendor-, and VCS-agnostic. Project- or
 vendor-specific extensions live in their own repos that embed this one as a
@@ -18,10 +19,7 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 .
 ├── CLAUDE.md           # entry point for Claude Code (uses @rules/* imports)
 ├── rules/              # universal code-quality and process rules
-├── sdd/                # Spec-Driven Development bundle. Optional, --sdd only.
-│   ├── *.md            #   methodology, enforcement registry, sdd-cli usage
-│   ├── hooks/          #   sdd-lint reminder
-│   └── skills/         #   spec-driven-development skill
+├── sdd-cli/            # git submodule: Spec-Driven Development tooling (--sdd only)
 ├── hooks/              # hooks installed unconditionally
 ├── skills/             # SKILL.md bundles, symlinked per-skill into both agents
 ├── build/              # generated, gitignored
@@ -38,24 +36,18 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 - **`rules/`** — universal coding rules (naming, architecture, testing,
   commits, errors, review, code-navigation, workflow, simplicity).
   Apply on every machine.
-- **`sdd/`** — Spec-Driven Development bundle: `spec-driven-development.md`
-  (methodology), `enforcement_registry.md` (mapping requirements ↔ `sdd-cli`
-  channels), `sdd-cli-usage.md` (phase-to-command mapping), plus
-  `workflow-sdd.md` and `review-sdd.md` addenda extending the universal
-  rules. Installed only with `--sdd`. Top-level `*.md` are inlined into
-  CLAUDE.md / AGENTS.md; the `sdd/hooks/sdd-lint-reminder.sh` hook and the
-  `sdd/skills/spec-driven-development/` skill are wired in alongside.
+- **`sdd-cli/`** — git submodule pinning
+  [sdd-cli](https://github.com/cyberash-dev/sdd-cli), the Spec-Driven
+  Development tool. Touched only with `--sdd`: install.sh fetches the
+  submodule, `npm install` + `npm run build` + `npm link`s it, then runs
+  `sdd install <mode>` so sdd-cli installs its own rules, skill, and hooks.
 - **`hooks/`** — hook scripts installed unconditionally
   (currently `lsp-reminder.sh`).
-- **`sdd/hooks/`** — hook scripts installed only with `--sdd`
-  (currently `sdd-lint-reminder.sh`).
 - **`skills/`** — SKILL.md bundles (open standard, supported by both Claude Code
   and Codex CLI / IDE). Each subdir is one skill and gets symlinked
   **per-skill** into `~/.claude/skills/<name>` and
   `~/.agents/skills/<name>`, so the user's own hand-rolled skills in those
-  directories are left untouched. Currently empty — drop new non-SDD
-  skills here. The SDD skill lives under `sdd/skills/` and is gated by
-  `--sdd`.
+  directories are left untouched. Currently empty — drop new skills here.
 - **`scripts/lib/install-lib.sh`** — shell library exposing the symlink,
   hook-registration, and import-inlining primitives. Sourced by this repo's
   drivers and intended to be reused by downstream extension repos.
@@ -71,7 +63,7 @@ understand `@import`, so `scripts/build.sh` produces a flattened
 git clone <this-repo> ~/Projects/coding-agent-config
 cd ~/Projects/coding-agent-config
 ./scripts/install.sh all                # universal rules + hooks
-./scripts/install.sh all --sdd          # + Spec-Driven Development bundle
+./scripts/install.sh all --sdd          # + Spec-Driven Development via sdd-cli
 ```
 
 ### Flags
@@ -79,20 +71,23 @@ cd ~/Projects/coding-agent-config
 | Flag | Effect |
 |---|---|
 | *(none)* | universal rules + `hooks/`. Agent uses built-in git knowledge. |
-| `--sdd` | + all `sdd/*.md` + `sdd/hooks/sdd-lint-reminder.sh` + `sdd/skills/spec-driven-development/`. Without the flag, any previously installed SDD artefact owned by this repo is removed. |
+| `--sdd` | fetch the `sdd-cli/` submodule, `npm install` + `npm run build` + `npm link` it, then run `sdd install <mode>`. sdd-cli installs its own rules, skill, and hooks. |
 
 ### Targets
 
 | Agent       | Target path                                 | Source                                |
 |-------------|---------------------------------------------|---------------------------------------|
-| Claude Code | `~/.claude/CLAUDE.md` (generated file)      | `CLAUDE.md` + optional SDD section    |
+| Claude Code | `~/.claude/CLAUDE.md` (generated file)      | `CLAUDE.md`                           |
 | Claude Code | `~/.claude/rules` (symlink)                 | `rules/`                              |
 | Claude Code | `~/.claude/hooks` (symlink)                 | `hooks/`                              |
-| Claude Code | `~/.claude/sdd` (symlink, with `--sdd`)     | `sdd/`                                |
 | Claude Code | `~/.claude/settings.json` (mutated)         | hook entries idempotently upserted    |
-| Claude Code | `~/.claude/skills/<name>` (symlink per skill) | `skills/<name>/` and (with `--sdd`) `sdd/skills/<name>/` |
+| Claude Code | `~/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`                    |
 | Codex CLI / IDE | `${CODEX_HOME:-~/.codex}/AGENTS.md` (symlink) | `build/AGENTS.md`                |
-| Codex CLI / IDE | `~/.agents/skills/<name>` (symlink per skill) | `skills/<name>/` and (with `--sdd`) `sdd/skills/<name>/` |
+| Codex CLI / IDE | `~/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`                |
+
+With `--sdd`, sdd-cli writes its own targets on top of the above
+(`~/.claude/sdd/`, `@sdd` imports appended to `~/.claude/CLAUDE.md`, its skill
+and hooks); see the [sdd-cli](https://github.com/cyberash-dev/sdd-cli) docs.
 
 If anything already exists at a target path it is renamed to
 `<target>.bak.<unix-timestamp>` before the symlink/file is created.
@@ -118,7 +113,8 @@ the `UserPromptSubmit` `PROJECT_MAP` reminder).
 | Hook | Event | Matcher | Installed when |
 |---|---|---|---|
 | `lsp-reminder.sh` | `PreToolUse` | `Grep\|Read` | always |
-| `sdd-lint-reminder.sh` | `PreToolUse` | `Edit\|Write\|MultiEdit` | `--sdd` (and removed when re-run without `--sdd`) |
+
+With `--sdd`, sdd-cli merges its own hooks into `~/.claude/settings.json`.
 
 ### MCP servers
 
@@ -141,21 +137,20 @@ MCP is skipped with a warning rather than aborting the whole install.
 
 ## Editing rules
 
-Edit files under `rules/`, `sdd/`, or `hooks/` directly. Claude Code picks up
+Edit files under `rules/` or `hooks/` directly. Claude Code picks up
 `*.md` changes on the next session — no rebuild needed (the symlinks resolve
 to live files in this repo).
 
 For Codex, regenerate the flat file after any `*.md` edit:
 
 ```bash
-./scripts/install.sh codex --sdd     # match the flags you installed with
+./scripts/install.sh codex     # also re-runs the build
 # or, equivalently:
-./scripts/build.sh --sdd
+./scripts/build.sh
 ```
 
-If you change which top-level `sdd/*.md` files exist (add or remove one),
-re-run `./scripts/install.sh claude --sdd` so `~/.claude/CLAUDE.md` is
-regenerated with the new `@`-import list.
+SDD docs live in the `sdd-cli` submodule; edit them there and re-run
+`./scripts/install.sh <mode> --sdd`.
 
 ## Per-agent install
 
@@ -164,11 +159,6 @@ regenerated with the new `@`-import list.
 ./scripts/install.sh codex  [--sdd]   # only Codex (also runs build)
 ./scripts/install.sh all    [--sdd]   # both
 ```
-
-## Adding a new SDD doc
-
-Drop `sdd/<topic>.md` into the repo. It is auto-discovered (alphabetical)
-and inlined when `--sdd` is set.
 
 ## Adding a new skill
 
@@ -183,12 +173,8 @@ are untouched. A same-name collision is backed up to
 
 ## Adding a new hook
 
-- Universal hook: drop `hooks/<name>.sh`, then add an `install_hook`
-  call in `install_claude` in `scripts/install.sh`.
-- SDD-only hook: drop `sdd/hooks/<name>.sh`, add an `install_hook` call
-  inside the `if [[ "$SDD" -eq 1 ]]` block, and a paired `remove_hook`
-  call in the `else` branch so the hook is dropped from settings.json
-  when the user re-runs without `--sdd`.
+Drop `hooks/<name>.sh`, then add an `install_hook` call in `install_claude`
+in `scripts/install.sh`.
 
 Hook registration is idempotent — re-running install will replace any
 prior entry that points at a script with the same basename.
