@@ -18,5 +18,8 @@ Rules are split by topic across files in `~/.claude/rules/`. Each file is pulled
 - @rules/commits.md — commit message format, granularity, no AI attribution
 - @rules/coding-discipline.md — think-before-coding, simplicity, surgical changes, goal-driven execution
 
+## Output
+- @rules/output-style.md — concise output, no filler, no emojis or em-dashes
+
 ## Tooling
 - @rules/code-navigation.md — tool priority: LSP / code-skeleton / Grep / Read

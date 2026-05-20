@@ -7,6 +7,12 @@ Tool priority for understanding code:
 3. `Grep` — text search only (bare identifier, comments, string literals).
 4. `Read` — when exact contents are required (before `Edit`) or the file is short.
 
+## Read discipline
+- Read a file before writing or editing it. Don't re-read a file you
+  already read this session unless it changed since.
+- Skip files over 100KB unless the task requires their contents; reach
+  for `mcp__code-skeleton__get_outline` or a targeted `Grep` instead.
+
 <!-- lsp:rules:start -->
 ## Semantic code navigation (builtin LSP)
 
