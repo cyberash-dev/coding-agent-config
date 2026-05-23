@@ -103,7 +103,8 @@ install_claude() {
   link "$REPO_ROOT/hooks" "$HOME/.claude/hooks"
   install_skills "$REPO_ROOT/skills" "$HOME/.claude/skills"
 
-  install_hook "$HOME/.claude/hooks/lsp-reminder.sh" "Grep|Read" "PreToolUse"
+  remove_hook "lsp-reminder.sh" "PreToolUse"
+  install_hook "$HOME/.claude/hooks/code-navigation-reminder.sh" "Grep|Read" "PreToolUse"
 
   register_core_mcp_claude
 }

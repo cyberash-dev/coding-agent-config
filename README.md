@@ -42,7 +42,7 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
   submodule, `npm install` + `npm run build` + `npm link`s it, then runs
   `sdd install <mode>` so sdd-cli installs its own rules, skill, and hooks.
 - **`hooks/`** — hook scripts installed unconditionally
-  (currently `lsp-reminder.sh`).
+  (currently `code-navigation-reminder.sh`).
 - **`skills/`** — SKILL.md bundles (open standard, supported by both Claude Code
   and Codex CLI / IDE). Each subdir is one skill and gets symlinked
   **per-skill** into `~/.claude/skills/<name>` and
@@ -112,7 +112,7 @@ the `UserPromptSubmit` `PROJECT_MAP` reminder).
 
 | Hook | Event | Matcher | Installed when |
 |---|---|---|---|
-| `lsp-reminder.sh` | `PreToolUse` | `Grep\|Read` | always |
+| `code-navigation-reminder.sh` | `PreToolUse` | `Grep\|Read` | always |
 
 With `--sdd`, sdd-cli merges its own hooks into `~/.claude/settings.json`.
 
