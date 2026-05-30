@@ -16,4 +16,11 @@ Two categories based on side effects:
 | Predicate| Boolean       | No            | Question      | `Animal.isFlying?` |
 
 ## Variables
-- Boolean variables are named as questions: `isNew`, `hasAccess`, `canEdit`
+- A variable's name reflects WHAT the value IS, specific enough to read on
+  its own. Avoid vague placeholders.
+  - BAD: `data`, `flag`, `value`, `tmp`, `info`, `res`
+  - GOOD: `unacknowledged_payments`, `merchants_by_id`, `created_from`
+- Boolean variables are named as a question, and the question MUST name its
+  subject and condition, never a bare adjective.
+  - BAD: `allowed`, `valid`, `ok`, `done` (adjective with no subject)
+  - GOOD: `is_new`, `has_access`, `can_edit`, `is_merchant_allowed_for_client_id`
