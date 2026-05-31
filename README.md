@@ -5,8 +5,8 @@ Portable coding-agent setup for Claude Code and Codex CLI / IDE on macOS.
 Single source of truth for universal coding rules and hooks. One script
 symlinks them into the per-user config locations of each agent and registers
 hooks in `~/.claude/settings.json`. The optional `--sdd` flag delegates
-Spec-Driven Development setup to [sdd-cli](https://github.com/cyberash-dev/sdd-cli),
-embedded here as a git submodule.
+Spec-Driven Development setup to the
+[`agent-sdd`](https://www.npmjs.com/package/agent-sdd) npm package.
 
 This repo is intentionally project-, vendor-, and VCS-agnostic. Project- or
 vendor-specific extensions live in their own repos that embed this one as a
@@ -19,7 +19,6 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 .
 ├── CLAUDE.md           # entry point for Claude Code (uses @rules/* imports)
 ├── rules/              # universal code-quality and process rules
-├── sdd-cli/            # git submodule: Spec-Driven Development tooling (--sdd only)
 ├── hooks/              # hooks installed unconditionally
 ├── skills/             # SKILL.md bundles, symlinked per-skill into both agents
 ├── build/              # generated, gitignored
@@ -36,11 +35,10 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 - **`rules/`** — universal coding rules (naming, architecture, testing,
   commits, errors, review, code-navigation, workflow, simplicity).
   Apply on every machine.
-- **`sdd-cli/`** — git submodule pinning
-  [sdd-cli](https://github.com/cyberash-dev/sdd-cli), the Spec-Driven
-  Development tool. Touched only with `--sdd`: install.sh fetches the
-  submodule, `npm install` + `npm run build` + `npm link`s it, then runs
-  `sdd install <mode>` so sdd-cli installs its own rules, skill, and hooks.
+- **Spec-Driven Development** — the [`agent-sdd`](https://www.npmjs.com/package/agent-sdd)
+  npm package, the Spec-Driven Development tool. Touched only with `--sdd`:
+  install.sh installs it globally (`npm install -g agent-sdd`), then runs
+  `sdd install <mode>` so agent-sdd installs its own rules, skill, and hooks.
 - **`hooks/`** — hook scripts installed unconditionally
   (currently `code-navigation-reminder.sh`).
 - **`skills/`** — SKILL.md bundles (open standard, supported by both Claude Code
@@ -63,7 +61,7 @@ understand `@import`, so `scripts/build.sh` produces a flattened
 git clone <this-repo> ~/Projects/coding-agent-config
 cd ~/Projects/coding-agent-config
 ./scripts/install.sh all                # universal rules + hooks
-./scripts/install.sh all --sdd          # + Spec-Driven Development via sdd-cli
+./scripts/install.sh all --sdd          # + Spec-Driven Development via agent-sdd
 ```
 
 ### Flags
@@ -71,7 +69,7 @@ cd ~/Projects/coding-agent-config
 | Flag | Effect |
 |---|---|
 | *(none)* | universal rules + `hooks/`. Agent uses built-in git knowledge. |
-| `--sdd` | fetch the `sdd-cli/` submodule, `npm install` + `npm run build` + `npm link` it, then run `sdd install <mode>`. sdd-cli installs its own rules, skill, and hooks. |
+| `--sdd` | install the `agent-sdd` npm package globally, then run `sdd install <mode>`. agent-sdd installs its own rules, skill, and hooks. |
 
 ### Targets
 
@@ -85,9 +83,9 @@ cd ~/Projects/coding-agent-config
 | Codex CLI / IDE | `${CODEX_HOME:-~/.codex}/AGENTS.md` (symlink) | `build/AGENTS.md`                |
 | Codex CLI / IDE | `~/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`                |
 
-With `--sdd`, sdd-cli writes its own targets on top of the above
+With `--sdd`, agent-sdd writes its own targets on top of the above
 (`~/.claude/sdd/`, `@sdd` imports appended to `~/.claude/CLAUDE.md`, its skill
-and hooks); see the [sdd-cli](https://github.com/cyberash-dev/sdd-cli) docs.
+and hooks); see the [`agent-sdd`](https://www.npmjs.com/package/agent-sdd) docs.
 
 If anything already exists at a target path it is renamed to
 `<target>.bak.<unix-timestamp>` before the symlink/file is created.
@@ -114,7 +112,7 @@ the `UserPromptSubmit` `PROJECT_MAP` reminder).
 |---|---|---|---|
 | `code-navigation-reminder.sh` | `PreToolUse` | `Grep\|Read` | always |
 
-With `--sdd`, sdd-cli merges its own hooks into `~/.claude/settings.json`.
+With `--sdd`, agent-sdd merges its own hooks into `~/.claude/settings.json`.
 
 ### MCP servers
 
@@ -149,8 +147,9 @@ For Codex, regenerate the flat file after any `*.md` edit:
 ./scripts/build.sh
 ```
 
-SDD docs live in the `sdd-cli` submodule; edit them there and re-run
-`./scripts/install.sh <mode> --sdd`.
+SDD docs ship inside the `agent-sdd` npm package. To pick up a new release,
+re-run `./scripts/install.sh <mode> --sdd` (it installs `agent-sdd` globally;
+remove the stale global package first if you need to force a downgrade).
 
 ## Per-agent install
 

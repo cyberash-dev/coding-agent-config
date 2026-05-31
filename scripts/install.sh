@@ -4,10 +4,10 @@
 #
 # Usage: install.sh <claude|codex|all> [--sdd]
 #
-# --sdd   Fetch the sdd-cli submodule (Spec-Driven Development tooling),
-#         `npm install` + `npm run build` + `npm link` it so the `sdd` bin
-#         lands on PATH, then run `sdd install <mode>`. sdd-cli installs its
-#         own rules, skill, and hooks for the chosen target(s).
+# --sdd   Install the `agent-sdd` npm package (Spec-Driven Development
+#         tooling) globally so the `sdd` bin lands on PATH, then run
+#         `sdd install <mode>`. agent-sdd installs its own rules, skill,
+#         and hooks for the chosen target(s).
 #
 # Hooks: install.sh always installs hooks from `hooks/`. Hook registration
 # in settings.json is idempotent — entries pointing at the canonical paths
@@ -36,8 +36,8 @@ Usage: $0 <claude|codex|all> [--sdd]
            and symlink skills into ~/.agents/skills
   all      both
 
-  --sdd    fetch the sdd-cli submodule, npm install + build + link it,
-           then run \`sdd install <mode>\` so sdd-cli installs its own
+  --sdd    install the \`agent-sdd\` npm package globally, then run
+           \`sdd install <mode>\` so agent-sdd installs its own
            SDD rules, skill, and hooks.
 EOF
   exit 2
@@ -59,13 +59,11 @@ done
 
 CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
 
-# Fetch and build the sdd-cli submodule, then link its `sdd` bin onto PATH.
+# Install the agent-sdd package globally so the `sdd` bin lands on PATH.
 ensure_sdd_cli() {
-  echo "[sdd-cli]"
-  git -C "$REPO_ROOT" submodule update --init --recursive sdd-cli
-  ( cd "$REPO_ROOT/sdd-cli" && npm install && npm run build && npm link )
-  command -v sdd >/dev/null 2>&1 \
-    || echo "  ! sdd not on PATH after npm link" >&2
+  echo "[agent-sdd]"
+  ensure_npm_global "agent-sdd" "sdd" >/dev/null \
+    || echo "  ! sdd not on PATH after npm install -g agent-sdd" >&2
 }
 
 # MCP servers referenced by core rules (rules/code-navigation.md → code-skeleton).
@@ -134,8 +132,8 @@ case "$MODE" in
   all)    install_claude; install_codex ;;
 esac
 
-# sdd-cli writes its own rules/skill/hooks into the target config(s); run it
-# last so build.sh's regeneration of build/AGENTS.md happens before sdd-cli
+# agent-sdd writes its own rules/skill/hooks into the target config(s); run it
+# last so build.sh's regeneration of build/AGENTS.md happens before agent-sdd
 # appends to the symlinked ~/.codex/AGENTS.md.
 if [[ "$SDD" -eq 1 ]]; then
   if command -v sdd >/dev/null 2>&1; then
