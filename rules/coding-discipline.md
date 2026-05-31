@@ -20,6 +20,12 @@ Minimum code that solves the problem. Nothing speculative.
 - No error handling for impossible scenarios.
 - If you write 200 lines and it could be 50, rewrite it.
 
+Hard size caps (enforced mechanically by the shared ESLint config; exceeding one
+means split or refactor, never raise the limit):
+- A function body stays under 80 non-blank lines.
+- A function takes at most 7 parameters; past that, pass an object.
+- A class or interface exposes at most 10 public methods and 10 public properties.
+
 Sanity check: "Would a senior engineer call this overcomplicated?" If yes, simplify.
 
 ## Surgical Changes
@@ -42,6 +48,12 @@ last resort, not a default.
 - No comments restating the obvious, marking sections, or narrating changes
   ("added for X", "used by Y", "fixes bug Z") — that belongs in commit messages.
 - No docstrings or block comments on trivial functions.
+- No code snippets or usage examples inside comments — those belong in tests
+  or external docs.
+- Use the block form `/* */`, not `//` line comments.
+- Keep any surviving comment short: a few lines of prose at most (the shared
+  ESLint config caps it at 4). Needing more means the code wants restructuring,
+  not a longer comment.
 - If a comment feels needed, first try: better name, smaller function,
   extracted variable. Comment only if those don't resolve the confusion.
 
