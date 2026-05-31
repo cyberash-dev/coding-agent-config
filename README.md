@@ -32,9 +32,9 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 
 ### What's where, and why
 
-- **`rules/`** — universal coding rules (naming, architecture, testing,
-  commits, errors, review, code-navigation, workflow, simplicity).
-  Apply on every machine.
+- **`rules/`** — universal coding rules (naming, architecture, typescript,
+  python, testing, commits, errors, review, code-navigation, workflow,
+  simplicity). Apply on every machine.
 - **Spec-Driven Development** — the [`agent-sdd`](https://www.npmjs.com/package/agent-sdd)
   npm package, the Spec-Driven Development tool. Touched only with `--sdd`:
   install.sh installs it globally (`npm install -g agent-sdd`), then runs

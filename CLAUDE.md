@@ -6,6 +6,7 @@ Rules are split by topic across files in `~/.claude/rules/`. Each file is pulled
 - @rules/naming.md — naming for classes, methods, variables
 - @rules/architecture.md — file organization, SOLID, hexagonal backend, FSD frontend
 - @rules/python.md — Python type annotations and pytest conventions
+- @rules/typescript.md — TypeScript type safety, async safety, specific types
 
 ## Quality
 - @rules/tdd.md — red-green-refactor, when to apply, anti-patterns
