@@ -21,6 +21,8 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 ├── rules/              # universal code-quality and process rules
 ├── hooks/              # hooks installed unconditionally
 ├── skills/             # SKILL.md bundles, symlinked per-skill into both agents
+├── templates/          # generation fragments (not symlinked into agents)
+│   └── language/       #   reply-language directive, selected by --lang
 ├── build/              # generated, gitignored
 │   └── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
 └── scripts/
@@ -62,6 +64,7 @@ git clone <this-repo> ~/Projects/coding-agent-config
 cd ~/Projects/coding-agent-config
 ./scripts/install.sh all                # universal rules + hooks
 ./scripts/install.sh all --sdd          # + Spec-Driven Development via agent-sdd
+./scripts/install.sh all --lang=en      # pin replies to English (or ru)
 ```
 
 ### Flags
@@ -69,6 +72,7 @@ cd ~/Projects/coding-agent-config
 | Flag | Effect |
 |---|---|
 | *(none)* | universal rules + `hooks/`. Agent uses built-in git knowledge. |
+| `--lang=ru\|en` | pin the agent's reply language. Omitted, the agent replies in the operator's own language; set, it always replies in Russian or English. |
 | `--sdd` | install the `agent-sdd` npm package globally, then run `sdd install <mode>`. agent-sdd installs its own rules, skill, and hooks. |
 
 ### Targets
@@ -154,9 +158,9 @@ remove the stale global package first if you need to force a downgrade).
 ## Per-agent install
 
 ```bash
-./scripts/install.sh claude [--sdd]   # only Claude Code
-./scripts/install.sh codex  [--sdd]   # only Codex (also runs build)
-./scripts/install.sh all    [--sdd]   # both
+./scripts/install.sh claude [--sdd] [--lang=ru|en]   # only Claude Code
+./scripts/install.sh codex  [--sdd] [--lang=ru|en]   # only Codex (also runs build)
+./scripts/install.sh all    [--sdd] [--lang=ru|en]   # both
 ```
 
 ## Adding a new skill

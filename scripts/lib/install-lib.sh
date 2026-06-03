@@ -14,6 +14,7 @@
 #   cleanup_legacy_codex_skills <source_root> [<source_root>...]
 #   unlink_if_repo_owned <target> <abs_source_root>
 #   inline_imports <source_file> <output_file> <prefix>=<root> [<prefix>=<root>...]
+#   language_section <lang> <templates_dir>
 #
 # Public globals (set on first source):
 #   TS                   — install timestamp, used for `.bak.<TS>` backups
@@ -278,6 +279,19 @@ inline_imports() {
     }
     { print }
   ' "$source_file" > "$output_file"
+}
+
+# Print the output-language directive section for <lang>, read from
+# <templates_dir>/<lang>.md. <lang> is default|ru|en.
+language_section() {
+  local lang="$1"
+  local templates_dir="$2"
+  local file="$templates_dir/${lang}.md"
+  if [[ ! -f "$file" ]]; then
+    echo "install-lib: unknown language fragment: $file" >&2
+    exit 1
+  fi
+  cat "$file"
 }
 
 # ----------------------------------------------------------------------------

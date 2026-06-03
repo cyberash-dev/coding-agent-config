@@ -2,7 +2,12 @@
 # Install symlinks from this repo into per-user agent config locations and
 # register hooks in ~/.claude/settings.json.
 #
-# Usage: install.sh <claude|codex|all> [--sdd]
+# Usage: install.sh <claude|codex|all> [--sdd] [--lang=ru|en]
+#
+# --lang  Pin the agent's reply language. Without it, the agent replies in
+#         whatever language the operator used. With `--lang=ru` or
+#         `--lang=en`, it always replies in that language. The directive is
+#         appended to the generated ~/.claude/CLAUDE.md and build/AGENTS.md.
 #
 # --sdd   Install the `agent-sdd` npm package (Spec-Driven Development
 #         tooling) globally so the `sdd` bin lands on PATH, then run
@@ -28,7 +33,7 @@ source "$REPO_ROOT/scripts/lib/install-lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 <claude|codex|all> [--sdd]
+Usage: $0 <claude|codex|all> [--sdd] [--lang=ru|en]
 
   claude   generate ~/.claude/CLAUDE.md, symlink ~/.claude/rules and
            ~/.claude/hooks
@@ -36,6 +41,8 @@ Usage: $0 <claude|codex|all> [--sdd]
            and symlink skills into ~/.agents/skills
   all      both
 
+  --lang   pin the reply language to ru or en. Omit to keep replying in
+           the operator's own language.
   --sdd    install the \`agent-sdd\` npm package globally, then run
            \`sdd install <mode>\` so agent-sdd installs its own
            SDD rules, skill, and hooks.
@@ -47,11 +54,17 @@ EOF
 
 MODE="$1"; shift
 SDD=0
+LANG_MODE=default
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sdd)
       SDD=1; shift
+      ;;
+    --lang=*)
+      LANG_MODE="${1#--lang=}"
+      case "$LANG_MODE" in ru|en) ;; *) usage ;; esac
+      shift
       ;;
     *) usage ;;
   esac
@@ -96,7 +109,8 @@ register_core_mcp_codex() {
 
 install_claude() {
   echo "[claude]"
-  write_generated "$HOME/.claude/CLAUDE.md" "$(cat "$REPO_ROOT/CLAUDE.md")"
+  write_generated "$HOME/.claude/CLAUDE.md" \
+    "$(cat "$REPO_ROOT/CLAUDE.md"; printf '\n'; language_section "$LANG_MODE" "$REPO_ROOT/templates/language")"
   link "$REPO_ROOT/rules" "$HOME/.claude/rules"
   link "$REPO_ROOT/hooks" "$HOME/.claude/hooks"
   install_skills "$REPO_ROOT/skills" "$HOME/.claude/skills"
@@ -109,7 +123,7 @@ install_claude() {
 
 install_codex() {
   echo "[codex]"
-  "$REPO_ROOT/scripts/build.sh"
+  "$REPO_ROOT/scripts/build.sh" --lang="$LANG_MODE"
   link "$REPO_ROOT/build/AGENTS.md" "$CODEX_CONFIG_DIR/AGENTS.md"
   install_skills "$REPO_ROOT/skills" "$HOME/.agents/skills"
   cleanup_legacy_codex_skills "$REPO_ROOT/skills"
