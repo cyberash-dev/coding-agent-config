@@ -73,7 +73,7 @@ done
 CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
 
 # Install the agent-sdd package globally so the `sdd` bin lands on PATH.
-ensure_sdd_cli() {
+ensure_agent_sdd() {
   echo "[agent-sdd]"
   ensure_npm_global "agent-sdd" "sdd" >/dev/null \
     || echo "  ! sdd not on PATH after npm install -g agent-sdd" >&2
@@ -137,7 +137,7 @@ case "$MODE" in
 esac
 
 if [[ "$SDD" -eq 1 ]]; then
-  ensure_sdd_cli
+  ensure_agent_sdd
 fi
 
 case "$MODE" in
