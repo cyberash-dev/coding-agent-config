@@ -1,9 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Stdin: JSON с tool_name и tool_input. Stdout: hookSpecificOutput c additionalContext.
 # Две ветки:
 #   Read  → подсказка про mcp__code-skeleton__* (структурный обзор)
 #   Grep  → подсказка про builtin LSP (семантика по идентификатору)
 [[ "$CODE_NAV_REMINDER_DISABLED" == "1" ]] && exit 0
+command -v jq >/dev/null 2>&1 || exit 0
 input=$(cat)
 tool=$(printf '%s' "$input" | jq -r '.tool_name')
 path=$(printf '%s' "$input" | jq -r '.tool_input.path // .tool_input.file_path // empty')

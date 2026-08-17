@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # PreToolUse (Bash). Before a `git commit` / `arc commit`, run the uncommitted
 # changes through codex in two passes: (1) review, (2) apply fixes straight into
 # the files. No human confirmation is asked for: the hook always returns
@@ -15,10 +15,23 @@
 #     session restart);
 #   the file ~/.claude/codex-commit-review.disabled — created/removed on the
 #     fly, path overridable through CODEX_COMMIT_REVIEW_FLAG;
-#   codex not installed.
-CODEX_COMMIT_REVIEW_FLAG="${CODEX_COMMIT_REVIEW_FLAG:-$HOME/.claude/codex-commit-review.disabled}"
+#   codex not installed;
+#   jq not installed.
+# The install anchors .claude at %USERPROFILE% on Windows, because Git Bash
+# derives $HOME from HOMEDRIVE/HOMEPATH. Follow it, or the kill switch lands in
+# a directory the agent never reads. Same rule as scripts/lib/platform.sh; this
+# hook runs standalone and cannot source it.
+agent_home() {
+  if [[ -n "${USERPROFILE:-}" ]] && command -v cygpath >/dev/null 2>&1; then
+    cygpath -u "$USERPROFILE"
+    return
+  fi
+  printf '%s' "$HOME"
+}
+CODEX_COMMIT_REVIEW_FLAG="${CODEX_COMMIT_REVIEW_FLAG:-$(agent_home)/.claude/codex-commit-review.disabled}"
 [[ "$CODEX_COMMIT_REVIEW_DISABLED" == "1" ]] && exit 0
 [[ -e "$CODEX_COMMIT_REVIEW_FLAG" ]] && exit 0
+command -v jq >/dev/null 2>&1 || exit 0
 
 input=$(cat)
 tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')

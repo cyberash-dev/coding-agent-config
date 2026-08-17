@@ -19,32 +19,41 @@
 #   inline_imports <source_file> <output_file> <prefix>=<root> [<prefix>=<root>...]
 #   language_section <lang> <templates_dir>
 #   ensure_agent_sdd
+#   mcp_launch_spec <pkg> <bin>
 #   register_core_mcp_claude / register_core_mcp_codex
 #
-# `ensure_mcp_npm_global <pkg> <bin>` comes from lib/npm-mcp-updates.sh,
-# sourced below.
+# `ensure_mcp_npm_global <pkg> <bin>` comes from lib/npm-mcp-updates.sh and
+# `os_kind` / `is_windows` / `agent_home` / `native_path` from lib/platform.sh,
+# both sourced below.
 #
 # Public globals (set on first source):
 #   TS                   — install timestamp, used for `.bak.<TS>` backups
-#   SETTINGS             — path to ~/.claude/settings.json
+#   SETTINGS             — path to $AGENT_HOME/.claude/settings.json
 #   SETTINGS_BACKED_UP   — 0/1 flag, mutated by every $SETTINGS writer
+#
+# Targets are anchored at $AGENT_HOME (see lib/platform.sh), which equals $HOME
+# everywhere except native Windows.
+
+_AGENT_CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=platform.sh
+source "$_AGENT_CONFIG_LIB_DIR/platform.sh"
+# shellcheck source=npm-mcp-updates.sh
+source "$_AGENT_CONFIG_LIB_DIR/npm-mcp-updates.sh"
 
 if [[ -z "${AGENT_CONFIG_LIB_LOADED:-}" ]]; then
   AGENT_CONFIG_LIB_LOADED=1
 
   TS="$(date +%s)"
-  SETTINGS="$HOME/.claude/settings.json"
+  SETTINGS="$AGENT_HOME/.claude/settings.json"
   SETTINGS_BACKED_UP=0
 
-  CLAUDE_CONFIG="$HOME/.claude.json"
+  CLAUDE_CONFIG="$AGENT_HOME/.claude.json"
   CLAUDE_CONFIG_BACKED_UP=0
 
-  CODEX_CONFIG_TOML="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  CODEX_CONFIG_TOML="${CODEX_HOME:-$AGENT_HOME/.codex}/config.toml"
   CODEX_CONFIG_BACKED_UP=0
 fi
-
-# shellcheck source=npm-mcp-updates.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/npm-mcp-updates.sh"
 
 # Back up $SETTINGS once per install run (first mutation only).
 _backup_settings_once() {
@@ -66,6 +75,17 @@ link() {
 
   mkdir -p "$(dirname "$target")"
 
+  if is_windows; then
+    _link_windows "$source" "$target"
+  else
+    _link_posix "$source" "$target"
+  fi
+}
+
+_link_posix() {
+  local source="$1"
+  local target="$2"
+
   if [[ -L "$target" ]]; then
     local current
     current="$(readlink "$target")"
@@ -75,14 +95,56 @@ link() {
     fi
   fi
 
+  _clear_link_target "$target"
+  ln -snf "$source" "$target"
+  echo "  + $target -> $source"
+}
+
+# Windows has no usable `ln -s`: Git Bash copies unless Developer Mode is on.
+# Directories become NTFS junctions, which need no elevation and keep the
+# repo-is-live model. A single file (build/AGENTS.md) has no junction
+# equivalent, so it is copied and has to be refreshed by re-running install.
+_link_windows() {
+  local source="$1"
+  local target="$2"
+
+  if [[ -d "$source" ]]; then
+    if is_same_dir "$target" "$source"; then
+      echo "  = $target -> $source (already linked)"
+      return 0
+    fi
+    _clear_link_target "$target"
+    create_junction "$target" "$source"
+    echo "  + $target -> $source (junction)"
+    return 0
+  fi
+
+  if [[ -f "$target" ]] && cmp -s "$source" "$target"; then
+    echo "  = $target -> $source (already copied)"
+    return 0
+  fi
+
+  _clear_link_target "$target"
+  cp "$source" "$target"
+  echo "  + $target -> $source (copied)"
+}
+
+# A junction is unlinked rather than moved aside: `mv` on a junction walks into
+# it and drags the contents out of the repo.
+_clear_link_target() {
+  local target="$1"
+
+  if is_windows && is_junction "$target"; then
+    remove_junction "$target"
+    echo "  - unlinked $target"
+    return 0
+  fi
+
   if [[ -e "$target" || -L "$target" ]]; then
     local backup="${target}.bak.${TS}"
     mv "$target" "$backup"
     echo "  ~ backed up $target -> $backup"
   fi
-
-  ln -snf "$source" "$target"
-  echo "  + $target -> $source"
 }
 
 write_generated() {
@@ -123,12 +185,24 @@ install_hook() {
 
   _backup_settings_once
 
+  # The agent reads settings.json as a native process, so the command has to be
+  # a path it can resolve. On Windows a shell-form hook falls back to PowerShell
+  # when Git Bash is missing, where a .sh script cannot run — name the shell so
+  # that failure is legible instead of silent.
+  local command_path shell
+  command_path="$(native_path "$script")"
+  shell=""
+  if is_windows; then
+    shell="bash"
+  fi
+
   local tmp
   tmp="$(mktemp)"
-  jq --arg script "$script" \
+  jq --arg script "$command_path" \
      --arg matcher "$matcher" \
      --arg event "$event" \
-     --arg basename "$basename" '
+     --arg basename "$basename" \
+     --arg shell "$shell" '
     .hooks //= {}
     | .hooks[$event] //= []
     | .hooks[$event] |= (
@@ -138,13 +212,17 @@ install_hook() {
         | map(select((.hooks // []) | length > 0))
       )
     | .hooks[$event] += [
-        ( {hooks: [{type: "command", command: $script}]}
+        ( {hooks: [
+             ( {type: "command", command: $script}
+               + ( if $shell == "" then {} else {shell: $shell} end )
+             )
+           ]}
           + ( if $matcher == "" then {} else {matcher: $matcher} end )
         )
       ]
   ' "$SETTINGS" > "$tmp"
   mv "$tmp" "$SETTINGS"
-  echo "  + hook $event${matcher:+ ($matcher)} -> $script"
+  echo "  + hook $event${matcher:+ ($matcher)} -> $command_path"
 }
 
 # Drop any hook entries whose command ends with <basename> from <event>.
@@ -310,7 +388,7 @@ install_codex_review_hook() {
     return 0
   fi
 
-  install_hook "$HOME/.claude/hooks/codex-commit-review.sh" "Bash" "PreToolUse"
+  install_hook "$AGENT_HOME/.claude/hooks/codex-commit-review.sh" "Bash" "PreToolUse"
 
   if ! command -v codex >/dev/null 2>&1; then
     echo "  ! 'codex' not on PATH — the hook stays inert until it is installed" >&2
@@ -334,7 +412,7 @@ install_skills() {
 # Remove same-name symlinks under ~/.codex/skills that point at any of the
 # given source roots. Removes the legacy ~/.codex/skills directory if empty.
 cleanup_legacy_codex_skills() {
-  local legacy_root="$HOME/.codex/skills"
+  local legacy_root="$AGENT_HOME/.codex/skills"
   [[ -d "$legacy_root" ]] || return 0
 
   local source_root
@@ -346,8 +424,13 @@ cleanup_legacy_codex_skills() {
       local name legacy
       name="$(basename "$src")"
       legacy="$legacy_root/$name"
-      [[ -L "$legacy" ]] || continue
-      rm "$legacy"
+      if is_windows && is_junction "$legacy"; then
+        remove_junction "$legacy"
+      elif [[ -L "$legacy" ]]; then
+        rm "$legacy"
+      else
+        continue
+      fi
       echo "  - removed legacy Codex skill $legacy"
     done
   done
@@ -355,11 +438,20 @@ cleanup_legacy_codex_skills() {
   rmdir "$legacy_root" 2>/dev/null || true
 }
 
-# Remove a symlink at <target> only if it resolves inside <abs_source_root>.
-# Never touches a real file/dir or a symlink pointing outside the given root.
+# Remove a link at <target> only if it resolves inside <abs_source_root>.
+# Never touches a real file/dir or a link pointing outside the given root.
 unlink_if_repo_owned() {
   local target="$1"
   local source_root="$2"
+
+  if is_windows && is_junction "$target"; then
+    if is_same_dir "$target" "$source_root" || _resolves_inside "$target" "$source_root"; then
+      remove_junction "$target"
+      echo "  - removed $target"
+    fi
+    return 0
+  fi
+
   [[ -L "$target" ]] || return 0
   local resolved
   resolved="$(readlink "$target")"
@@ -369,6 +461,12 @@ unlink_if_repo_owned() {
       echo "  - removed $target"
       ;;
   esac
+}
+
+_resolves_inside() {
+  local resolved
+  resolved="$( (cd "$1" 2>/dev/null && pwd -P) )"
+  [[ -n "$resolved" && "$resolved" == "$2"/* ]]
 }
 
 # Inline @<prefix>/<file>.md references in <source_file> by reading the file
@@ -718,24 +816,86 @@ ensure_agent_sdd() {
     || echo "  ! sdd not on PATH after npm install -g agent-sdd" >&2
 }
 
+# Decide how a globally installed npm MCP package should be spawned by the
+# agent. Args: <pkg> <bin>. Stdout: {"command": ..., "args": [...]}.
+# Returns 1 when the package is not on PATH.
+#
+# npm on Windows installs a .cmd shim, which is not an executable and cannot be
+# spawned without a shell — so the package's own JS entry point is handed to
+# node instead, per the Claude Code guidance for Windows.
+mcp_launch_spec() {
+  local pkg="$1"
+  local bin="$2"
+
+  local bin_path
+  bin_path="$(command -v "$bin" 2>/dev/null || true)"
+  [[ -n "$bin_path" ]] || return 1
+
+  if ! is_windows; then
+    jq -n --arg command "$bin_path" '{command: $command, args: []}'
+    return 0
+  fi
+
+  local entry
+  entry="$(_npm_global_bin_entry "$pkg" "$bin" 2>/dev/null || true)"
+  if [[ -n "$entry" ]]; then
+    jq -n --arg entry "$entry" '{command: "node", args: [$entry]}'
+    return 0
+  fi
+
+  jq -n --arg bin "$bin" '{command: "cmd", args: ["/c", $bin]}'
+}
+
+# Absolute path of the JS file behind <bin> in the globally installed <pkg>.
+_npm_global_bin_entry() {
+  local pkg="$1"
+  local bin="$2"
+
+  command -v npm >/dev/null 2>&1 || return 1
+  command -v node >/dev/null 2>&1 || return 1
+
+  local root
+  root="$(npm root -g 2>/dev/null)" || return 1
+  [[ -n "$root" ]] || return 1
+  root="$(posix_path "$root")"
+
+  local manifest="$root/$pkg/package.json"
+  [[ -f "$manifest" ]] || return 1
+
+  local relative
+  relative="$(node -e '
+    const fs = require("fs");
+    const [manifest, bin] = process.argv.slice(1);
+    const pkg = JSON.parse(fs.readFileSync(manifest, "utf8"));
+    const entry = typeof pkg.bin === "string" ? pkg.bin : (pkg.bin || {})[bin];
+    if (!entry) process.exit(1);
+    console.log(entry);
+  ' "$manifest" "$bin")" || return 1
+
+  native_path "$root/$pkg/$relative"
+}
+
 # Register the code-skeleton MCP referenced by rules/code-navigation.md, if its
 # bin made it onto PATH.
 register_core_mcp_claude() {
-  local cs_bin
-  cs_bin="$(command -v code-skeleton-mcp 2>/dev/null || true)"
-  if [[ -z "$cs_bin" ]]; then
-    echo "  ! code-skeleton-mcp not on PATH; skip claude registration" >&2
-    return 0
-  fi
-  register_mcp_claude "code-skeleton" "$cs_bin" "[]" "{}"
+  _register_core_mcp claude
 }
 
 register_core_mcp_codex() {
-  local cs_bin
-  cs_bin="$(command -v code-skeleton-mcp 2>/dev/null || true)"
-  if [[ -z "$cs_bin" ]]; then
-    echo "  ! code-skeleton-mcp not on PATH; skip codex registration" >&2
+  _register_core_mcp codex
+}
+
+_register_core_mcp() {
+  local agent="$1"
+
+  local spec
+  if ! spec="$(mcp_launch_spec "code-skeleton-mcp" "code-skeleton-mcp")"; then
+    echo "  ! code-skeleton-mcp not on PATH; skip $agent registration" >&2
     return 0
   fi
-  register_mcp_codex "code-skeleton" "$cs_bin" "[]" "{}"
+
+  local launch_command launch_args
+  launch_command="$(printf '%s' "$spec" | jq -r '.command')"
+  launch_args="$(printf '%s' "$spec" | jq -c '.args')"
+  "register_mcp_$agent" "code-skeleton" "$launch_command" "$launch_args" "{}"
 }

@@ -106,7 +106,26 @@ if [[ "$CODEX_REVIEW" -eq 1 && "$MODE" == "codex" ]]; then
   echo "install.sh: --codex-review applies to claude/all; ignored for the codex mode" >&2
 fi
 
-CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_CONFIG_DIR="${CODEX_HOME:-$AGENT_HOME/.codex}"
+
+# Every writer below needs jq and awk. Bail before the first mutation instead of
+# aborting halfway through, with links already created and hooks not registered.
+require_deps() {
+  local missing=()
+  local tool
+  for tool in jq awk; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  done
+  [[ ${#missing[@]} -gt 0 ]] || return 0
+
+  echo "install.sh: missing required tool(s): ${missing[*]}" >&2
+  case "$(os_kind)" in
+    macos)   echo "  install with: brew install ${missing[*]}" >&2 ;;
+    linux)   echo "  install with: sudo apt install ${missing[*]}  (or your distro's package manager)" >&2 ;;
+    windows) echo "  install with: winget install jqlang.jq  (awk ships with Git for Windows)" >&2 ;;
+  esac
+  exit 1
+}
 
 # MCP servers referenced by core rules (rules/code-navigation.md → code-skeleton).
 # Each entry is registered in ~/.claude.json or ~/.codex/config.toml depending
@@ -118,14 +137,14 @@ ensure_core_mcp_packages() {
 
 install_claude() {
   echo "[claude]"
-  write_generated "$HOME/.claude/CLAUDE.md" \
+  write_generated "$AGENT_HOME/.claude/CLAUDE.md" \
     "$(cat "$REPO_ROOT/CLAUDE.md"; printf '\n'; language_section "$LANG_MODE" "$REPO_ROOT/templates/language")"
-  link "$REPO_ROOT/rules" "$HOME/.claude/rules"
-  link "$REPO_ROOT/hooks" "$HOME/.claude/hooks"
-  install_skills "$REPO_ROOT/skills" "$HOME/.claude/skills"
+  link "$REPO_ROOT/rules" "$AGENT_HOME/.claude/rules"
+  link "$REPO_ROOT/hooks" "$AGENT_HOME/.claude/hooks"
+  install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.claude/skills"
 
   remove_hook "lsp-reminder.sh" "PreToolUse"
-  install_hook "$HOME/.claude/hooks/code-navigation-reminder.sh" "Grep|Read" "PreToolUse"
+  install_hook "$AGENT_HOME/.claude/hooks/code-navigation-reminder.sh" "Grep|Read" "PreToolUse"
   install_codex_review_hook "$CODEX_REVIEW"
 
   register_core_mcp_claude
@@ -136,16 +155,19 @@ install_codex() {
   echo "[codex]"
   "$REPO_ROOT/scripts/build.sh" --lang="$LANG_MODE"
   link "$REPO_ROOT/build/AGENTS.md" "$CODEX_CONFIG_DIR/AGENTS.md"
-  install_skills "$REPO_ROOT/skills" "$HOME/.agents/skills"
+  install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.agents/skills"
   cleanup_legacy_codex_skills "$REPO_ROOT/skills"
 
   register_core_mcp_codex
 }
 
 case "$MODE" in
-  claude|codex|all) ensure_core_mcp_packages ;;
+  claude|codex|all) ;;
   *)                usage ;;
 esac
+
+require_deps
+ensure_core_mcp_packages
 
 if [[ "$SDD" -eq 1 ]]; then
   ensure_agent_sdd

@@ -1,6 +1,7 @@
 # coding-agent-config
 
-Portable coding-agent setup for Claude Code and Codex CLI / IDE on macOS.
+Portable coding-agent setup for Claude Code and Codex CLI / IDE on macOS,
+Linux, and Windows.
 
 Single source of truth for universal coding rules and hooks. One script
 symlinks them into the per-user config locations of each agent and registers
@@ -31,6 +32,7 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
     ├── install.sh      # symlink into Claude/Codex config locations
     └── lib/
         ├── install-lib.sh      # reusable shell helpers (public extension surface)
+        ├── platform.sh         # OS detection and path translation (sourced by install-lib)
         └── npm-mcp-updates.sh  # npm-backed MCP install/update (sourced by install-lib)
 ```
 
@@ -53,13 +55,62 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 - **`scripts/lib/install-lib.sh`** — shell library exposing the symlink,
   hook-registration, permission/env, MCP-registration, and import-inlining
   primitives. Sourced by this repo's drivers and intended to be reused by
-  downstream extension repos. It sources `npm-mcp-updates.sh`, so
-  `ensure_mcp_npm_global` comes with it.
+  downstream extension repos. It sources `platform.sh` and
+  `npm-mcp-updates.sh`, so `agent_home`, `native_path` and
+  `ensure_mcp_npm_global` come with it.
+- **`scripts/lib/platform.sh`** — OS detection (`os_kind`, `is_windows`), the
+  install root (`agent_home` / `$AGENT_HOME`), path translation
+  (`native_path`, `windows_path`, `posix_path`) and the NTFS junction
+  primitives. Everything here is the identity on macOS and Linux.
 
 `CLAUDE.md` is intentionally tiny — a table of contents that Claude Code
 expands at session start via `@rules/X.md` imports. Codex does not
 understand `@import`, so `scripts/build.sh` produces a flattened
 `build/AGENTS.md` with all referenced files inlined.
+
+## Platform support
+
+| Platform | How install.sh runs | Link model |
+|---|---|---|
+| macOS | any shell | symlinks |
+| Linux (incl. WSL) | any shell | symlinks |
+| Windows, native | **from Git Bash** | junctions for directories, copy for files |
+
+Required on every platform: `bash`, `jq`, `awk`. `node` + `npm` are optional —
+without them the MCP registration is skipped with a warning and everything else
+installs. `install.sh` checks for the required tools before it mutates
+anything, so a missing `jq` aborts the run cleanly instead of leaving a
+half-install.
+
+### Windows
+
+Run `./scripts/install.sh` **from Git Bash**, not PowerShell or CMD.
+[Git for Windows](https://git-scm.com/downloads/win) is required: it provides
+the bash that runs the installer and the bash that Claude Code uses to execute
+the `hooks/*.sh` scripts. Without it Claude Code falls back to PowerShell,
+where a `.sh` hook cannot run — hooks are therefore registered with
+`"shell": "bash"` on Windows so that failure is explicit.
+
+Two behaviours differ from macOS/Linux:
+
+- **Directories are NTFS junctions, not symlinks.** `ln -s` under Git Bash
+  copies unless Developer Mode is on, so `rules/`, `hooks/` and each skill are
+  linked with `mklink /J`, which needs no elevation. The repo stays the live
+  source: editing `rules/*.md` takes effect on the next Claude Code session,
+  exactly as on macOS.
+- **`AGENTS.md` is a copy.** A single file has no junction equivalent, so
+  `${CODEX_HOME:-%USERPROFILE%\.codex}\AGENTS.md` is copied. After editing any
+  `*.md`, re-run `./scripts/install.sh codex` to refresh it.
+
+Install targets are anchored at `%USERPROFILE%`, not `$HOME`: Git Bash derives
+`$HOME` from `HOMEDRIVE`/`HOMEPATH`, which corporate profiles point at a
+network share, while Claude Code itself reads `%USERPROFILE%\.claude`.
+
+### WSL
+
+WSL is treated as Linux and works with no special handling. Note that a WSL
+install configures the Claude Code **inside** WSL — it does not reach a
+Windows-side installation, and vice versa. Pick one and install there.
 
 ## First-time install on a new machine
 
@@ -84,15 +135,19 @@ cd ~/Projects/coding-agent-config
 
 ### Targets
 
+`$AGENT_HOME` below is `$HOME` on macOS and Linux, and `%USERPROFILE%` on
+Windows. "symlink" means a junction on Windows (see
+[Platform support](#platform-support)).
+
 | Agent       | Target path                                 | Source                                |
 |-------------|---------------------------------------------|---------------------------------------|
-| Claude Code | `~/.claude/CLAUDE.md` (generated file)      | `CLAUDE.md`                           |
-| Claude Code | `~/.claude/rules` (symlink)                 | `rules/`                              |
-| Claude Code | `~/.claude/hooks` (symlink)                 | `hooks/`                              |
-| Claude Code | `~/.claude/settings.json` (mutated)         | hook entries idempotently upserted; `env` with `--teams` |
-| Claude Code | `~/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`                    |
-| Codex CLI / IDE | `${CODEX_HOME:-~/.codex}/AGENTS.md` (symlink) | `build/AGENTS.md`                |
-| Codex CLI / IDE | `~/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`                |
+| Claude Code | `$AGENT_HOME/.claude/CLAUDE.md` (generated file) | `CLAUDE.md`                      |
+| Claude Code | `$AGENT_HOME/.claude/rules` (symlink)       | `rules/`                              |
+| Claude Code | `$AGENT_HOME/.claude/hooks` (symlink)       | `hooks/`                              |
+| Claude Code | `$AGENT_HOME/.claude/settings.json` (mutated) | hook entries idempotently upserted; `env` with `--teams` |
+| Claude Code | `$AGENT_HOME/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`          |
+| Codex CLI / IDE | `${CODEX_HOME:-$AGENT_HOME/.codex}/AGENTS.md` (symlink, copy on Windows) | `build/AGENTS.md` |
+| Codex CLI / IDE | `$AGENT_HOME/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`      |
 
 With `--sdd`, agent-sdd writes its own targets on top of the above
 (`~/.claude/sdd/`, `@sdd` imports appended to `~/.claude/CLAUDE.md`, its skill
@@ -151,14 +206,20 @@ if the bin is already on PATH). Other MCP entries you have in
 `~/.claude.json` / `~/.codex/config.toml` are left untouched; only the names
 listed above are upserted.
 
+On macOS and Linux the registered `command` is the absolute path to the
+installed bin. On Windows npm installs a `.cmd` shim, which the agent cannot
+spawn without a shell, so the package's own JS entry point is registered as
+`node <path>` instead (falling back to `cmd /c <bin>` if it cannot be
+resolved).
+
 If `npm install -g` fails (no network, missing registry auth, etc.), the
 MCP is skipped with a warning rather than aborting the whole install.
 
 ## Editing rules
 
 Edit files under `rules/` or `hooks/` directly. Claude Code picks up
-`*.md` changes on the next session — no rebuild needed (the symlinks resolve
-to live files in this repo).
+`*.md` changes on the next session — no rebuild needed (the symlinks, and the
+junctions on Windows, resolve to live files in this repo).
 
 For Codex, regenerate the flat file after any `*.md` edit:
 
@@ -167,6 +228,9 @@ For Codex, regenerate the flat file after any `*.md` edit:
 # or, equivalently:
 ./scripts/build.sh
 ```
+
+On Windows `./scripts/build.sh` alone is not enough: `AGENTS.md` is a copy, not
+a link, so use `./scripts/install.sh codex` to rebuild **and** re-copy it.
 
 SDD docs ship inside the `agent-sdd` npm package. To pick up a new release,
 re-run `./scripts/install.sh <mode> --sdd` (it installs `agent-sdd` globally;
@@ -210,10 +274,16 @@ this install should:
    `scripts/install.sh`.
 3. Call `link`, `install_hook`, `install_skills`, `install_permission_rules`,
    `install_teams_env`, `install_codex_review_hook`, `ensure_mcp_npm_global`,
-   `ensure_agent_sdd`, `register_mcp_claude`, `register_mcp_codex`,
-   `register_core_mcp_claude`, `register_core_mcp_codex`, etc. with paths
-   inside the extension repo, and append its own `## <Section>` blocks to
-   `~/.claude/CLAUDE.md` after the core driver has written it.
+   `ensure_agent_sdd`, `mcp_launch_spec`, `register_mcp_claude`,
+   `register_mcp_codex`, `register_core_mcp_claude`, `register_core_mcp_codex`,
+   etc. with paths inside the extension repo, and append its own
+   `## <Section>` blocks to `$AGENT_HOME/.claude/CLAUDE.md` after the core
+   driver has written it.
+
+Downstream drivers should anchor their own targets at `$AGENT_HOME` rather than
+`$HOME`, and pass anything that lands in a config file consumed by the agent
+(hook commands, MCP commands) through `native_path`. Both come from
+`platform.sh`, which `install-lib.sh` sources.
 
 The lib is the only stable contract. Helpers are documented in the file
 header and remain backwards-compatible across patch releases.
