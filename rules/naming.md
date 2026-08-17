@@ -15,6 +15,12 @@ Two categories based on side effects:
 | Command  | No (void)     | Yes           | Verb          | `Car.stop()` |
 | Predicate| Boolean       | No            | Question      | `Animal.isFlying?` |
 
+- Name a method or helper for the general concept it implements, not for the
+  first caller or specific feature that needed it. If nothing in the body ties to
+  that feature, drop the feature prefix.
+  - BAD: `pay_sbp_commission_hint` for a helper whose text only says the commission is zero
+  - GOOD: `zero_commission_hint`
+
 ## Variables
 - A variable's name reflects WHAT the value IS, specific enough to read on
   its own. Avoid vague placeholders.
@@ -24,3 +30,8 @@ Two categories based on side effects:
   subject and condition, never a bare adjective.
   - BAD: `allowed`, `valid`, `ok`, `done` (adjective with no subject)
   - GOOD: `is_new`, `has_access`, `can_edit`, `is_merchant_allowed_for_client_id`
+- A name MUST NOT claim more than the value actually guarantees. If an attribute
+  or boolean implies a broader condition than it really ensures, rename it to the
+  exact thing it holds or fix the computation — a misleading name is a bug.
+  - BAD: `is_split_enabled` on a merchant used to mean "BNPL is available to the
+    user" (split-on-merchant does not guarantee BNPL for that user)

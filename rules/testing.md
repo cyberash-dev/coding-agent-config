@@ -22,6 +22,11 @@
   end-to-end through its public entry point. Internal mocks couple tests to
   structure and rot on every refactor
 - Prefer **fakes** (in-memory implementations) over mocks when feasible
+- Assert observable behavior through the public entry point (the handler's
+  response, the value actually forwarded downstream), never the mock's own
+  output, a schema definition, or generated/contract structure (reflection
+  guards). A test that would pass without exercising real behavior tests the
+  framework, not the code
 
 ## No fixtures, no setUp/tearDown
 - **Do not use fixtures, `setUp`/`tearDown`, or `conftest`-level shared
@@ -48,6 +53,14 @@
   reason and a ticket reference
 - Failure messages must point to the cause. Prefer specific assertions
   (`assertEqual(x, 3)`) over generic ones (`assertTrue(x == 3)`)
+- Test files live next to the code they exercise, following the project's
+  test-location convention — don't park them in a separate `tests/regression/`
+  tree away from the code under test
+- Confirm a new test is actually collected and executed by the suite (wired
+  into the build/test target). A present-but-unrun test gives false coverage
+- Match test count to behavior complexity. Don't pile near-duplicate cases on
+  trivial logic; cover the key cases plus the untested siblings, and drop
+  redundant guard tests that assert nothing about real behavior
 
 ## Negative paths
 - Every public behavior has tests for invalid input, boundary values, and
@@ -67,4 +80,6 @@
   reset it explicitly in setup, never rely on test order
 - No test depends on another test having run (or not run) first
 - No real time, real network, real database without explicit opt-in
+- A DB query without `ORDER BY` returns rows in nondeterministic order; a test
+  asserting a fixed order is flaky — add `ORDER BY` or sort before asserting
 - Failing test must point to the cause — assertion messages should be specific

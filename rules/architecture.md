@@ -41,6 +41,10 @@ features/
   `UserId`) live in `shared/`. Use case logic never goes there.
 - **No layer-based top-level folders** — avoid global `controllers/`, `services/`,
   `repositories/`. Those concerns live inside the relevant slice.
+- **External mapping lives in the outbound adapter** — normalizing a provider's
+  response (codes → domain `enum`, whitelisting which fields are exposed) is the
+  driven adapter's job, not the use case's. Application and domain receive
+  already-normalized domain values, never a raw external payload.
 
 ## Frontend Architecture — Feature-Sliced Design (FSD)
 - Layers (top to bottom): `app` → `pages` → `widgets` → `features` → `entities` → `shared`

@@ -12,6 +12,8 @@ Run through this list before presenting changes or committing.
 - [ ] No orphan imports/variables/functions left by my own changes
 - [ ] No dead code I added (commented-out blocks, unused helpers)
 - [ ] No debug prints, `console.log`, `breakpoint()`, `TODO(me)` left behind
+- [ ] No committed operational/pipeline artifacts (run logs, integration-run
+      dirs, `.state`, `validation.log`) — the diff is source only
 
 ## Conventions
 - [ ] Names follow `naming.md` (nouns for queries, verbs for commands,
@@ -20,6 +22,8 @@ Run through this list before presenting changes or committing.
       direction, no leakage from `domain/`)
 - [ ] Style matches the surrounding file — even if I'd write it differently
 - [ ] Python: type annotations on every argument (see `python.md`)
+- [ ] Parallel files stay in sync — a translation key added to one locale
+      (`ru.json`) is added to every sibling (`en.json`)
 
 ## Tests
 - [ ] New behavior has a test; bug fix has a regression test

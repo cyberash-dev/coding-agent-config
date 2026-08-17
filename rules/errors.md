@@ -6,11 +6,17 @@
   before re-raising. `except: pass` is almost always wrong
 - Validate at **system boundaries** (user input, external API responses,
   deserialization). Trust internal code — no defensive checks for impossible
-  states (see `coding-discipline.md` → Simplicity First)
+  states (see `coding-discipline.md` → Simplicity First). Normalize and
+  whitelist external-provider fields at the boundary before exposing them
+  outward — never proxy a raw provider field through without proof it is safe
+  to expose
 - Distinguish:
   - **Expected** failures (invalid input, not found, conflict) → typed error,
     handled by caller
   - **Bugs** (broken invariants) → exception/assert, surfaces to top-level
+  - **Distinct causes get distinct codes** — don't collapse a request timeout
+    into a generic 500; give it its own status/code (e.g. 504 `REQUEST_TIMEOUT`)
+    so it stays distinguishable downstream
 - Prefer specific exception types over generic `Exception` / `Error`
 
 ## Logging
@@ -22,6 +28,9 @@
 - Use **structured context** (key-value), not prose: `log.info("payment.processed", user_id=..., amount=...)`
 - Never log secrets, tokens, full PII, raw request bodies that may contain them
 - Don't log-and-rethrow — pick one. Logging at every layer creates noise
+- Don't emit logs that carry no varying information — a "parametrized" log that
+  always logs the same constant is noise. Don't duplicate lifecycle logs the
+  framework already emits; enrich the structured context instead
 
 ## Don't
 - Don't add fallbacks for scenarios that can't happen

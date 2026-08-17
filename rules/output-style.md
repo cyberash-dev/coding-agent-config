@@ -19,3 +19,9 @@ How responses read for the user. Distinct from code style (see
 ## Formatting
 - No emojis unless the user explicitly asks.
 - No em-dashes. Use a comma, colon, or sentence break instead.
+
+## PR artifacts
+- PR title: a specific imperative summary in the team's code-review naming
+  format, not a restated ticket id.
+- PR description: state the *why* concisely and self-contained — a reviewer
+  should grasp the change without reading the whole ticket.
