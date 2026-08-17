@@ -25,11 +25,13 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 │   └── language/       #   reply-language directive, selected by --lang
 ├── build/              # generated, gitignored
 │   └── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
+├── tests/              # shell tests for the install libs (`bash tests/<name>.test.sh`)
 └── scripts/
     ├── build.sh        # rebuild build/AGENTS.md
     ├── install.sh      # symlink into Claude/Codex config locations
     └── lib/
-        └── install-lib.sh  # reusable shell helpers (public extension surface)
+        ├── install-lib.sh      # reusable shell helpers (public extension surface)
+        └── npm-mcp-updates.sh  # npm-backed MCP install/update (sourced by install-lib)
 ```
 
 ### What's where, and why
@@ -41,16 +43,18 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
   npm package, the Spec-Driven Development tool. Touched only with `--sdd`:
   install.sh installs it globally (`npm install -g agent-sdd`), then runs
   `sdd install <mode>` so agent-sdd installs its own rules, skill, and hooks.
-- **`hooks/`** — hook scripts installed unconditionally
-  (currently `code-navigation-reminder.sh`).
+- **`hooks/`** — hook scripts. `code-navigation-reminder.sh` is registered
+  unconditionally; `codex-commit-review.sh` only with `--codex-review`.
 - **`skills/`** — SKILL.md bundles (open standard, supported by both Claude Code
   and Codex CLI / IDE). Each subdir is one skill and gets symlinked
   **per-skill** into `~/.claude/skills/<name>` and
   `~/.agents/skills/<name>`, so the user's own hand-rolled skills in those
   directories are left untouched. Currently empty — drop new skills here.
 - **`scripts/lib/install-lib.sh`** — shell library exposing the symlink,
-  hook-registration, and import-inlining primitives. Sourced by this repo's
-  drivers and intended to be reused by downstream extension repos.
+  hook-registration, permission/env, MCP-registration, and import-inlining
+  primitives. Sourced by this repo's drivers and intended to be reused by
+  downstream extension repos. It sources `npm-mcp-updates.sh`, so
+  `ensure_mcp_npm_global` comes with it.
 
 `CLAUDE.md` is intentionally tiny — a table of contents that Claude Code
 expands at session start via `@rules/X.md` imports. Codex does not
@@ -74,6 +78,9 @@ cd ~/Projects/coding-agent-config
 | *(none)* | universal rules + `hooks/`. Agent uses built-in git knowledge. |
 | `--lang=ru\|en` | pin the agent's reply language. Omitted, the agent replies in the operator's own language; set, it always replies in Russian or English. |
 | `--sdd` | install the `agent-sdd` npm package globally, then run `sdd install <mode>`. agent-sdd installs its own rules, skill, and hooks. |
+| `--teams` | set `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (claude/all). Omitted, the key is removed. |
+| `--codex-review` | register the `codex-commit-review.sh` `PreToolUse` hook (claude/all). Omitted, the hook is removed. |
+| `--update-mcps` | update npm-backed MCP packages to `latest` without asking per package. |
 
 ### Targets
 
@@ -82,7 +89,7 @@ cd ~/Projects/coding-agent-config
 | Claude Code | `~/.claude/CLAUDE.md` (generated file)      | `CLAUDE.md`                           |
 | Claude Code | `~/.claude/rules` (symlink)                 | `rules/`                              |
 | Claude Code | `~/.claude/hooks` (symlink)                 | `hooks/`                              |
-| Claude Code | `~/.claude/settings.json` (mutated)         | hook entries idempotently upserted    |
+| Claude Code | `~/.claude/settings.json` (mutated)         | hook entries idempotently upserted; `env` with `--teams` |
 | Claude Code | `~/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`                    |
 | Codex CLI / IDE | `${CODEX_HOME:-~/.codex}/AGENTS.md` (symlink) | `build/AGENTS.md`                |
 | Codex CLI / IDE | `~/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`                |
@@ -115,6 +122,16 @@ the `UserPromptSubmit` `PROJECT_MAP` reminder).
 | Hook | Event | Matcher | Installed when |
 |---|---|---|---|
 | `code-navigation-reminder.sh` | `PreToolUse` | `Grep\|Read` | always |
+| `codex-commit-review.sh` | `PreToolUse` | `Bash` | `--codex-review` |
+
+`codex-commit-review.sh` is opt-in on purpose: before every `git commit` /
+`arc commit` it runs `codex` twice — a read-only review pass, then a
+`workspace-write` pass that edits the working copy and re-stages the files that
+were already staged. It never asks for confirmation, it reports what it did
+through the hook's `additionalContext`. It is fail-open (no `codex` on PATH,
+or a failing pass, lets the commit through untouched) and can be muted at
+runtime with `~/.claude/codex-commit-review.disabled` or
+`CODEX_COMMIT_REVIEW_DISABLED=1`.
 
 With `--sdd`, agent-sdd merges its own hooks into `~/.claude/settings.json`.
 
@@ -158,9 +175,9 @@ remove the stale global package first if you need to force a downgrade).
 ## Per-agent install
 
 ```bash
-./scripts/install.sh claude [--sdd] [--lang=ru|en]   # only Claude Code
+./scripts/install.sh claude [--sdd] [--teams] [--codex-review] [--lang=ru|en]
 ./scripts/install.sh codex  [--sdd] [--lang=ru|en]   # only Codex (also runs build)
-./scripts/install.sh all    [--sdd] [--lang=ru|en]   # both
+./scripts/install.sh all    [--sdd] [--teams] [--codex-review] [--lang=ru|en]
 ```
 
 ## Adding a new skill
@@ -191,10 +208,12 @@ this install should:
 1. Embed this repo as a git submodule.
 2. `source <submodule>/scripts/lib/install-lib.sh` from its own
    `scripts/install.sh`.
-3. Call `link`, `install_hook`, `install_skills`, `register_mcp_claude`,
-   `register_mcp_codex`, etc. with paths inside the extension repo, and
-   append its own `## <Section>` blocks to `~/.claude/CLAUDE.md` after the
-   core driver has written it.
+3. Call `link`, `install_hook`, `install_skills`, `install_permission_rules`,
+   `install_teams_env`, `install_codex_review_hook`, `ensure_mcp_npm_global`,
+   `ensure_agent_sdd`, `register_mcp_claude`, `register_mcp_codex`,
+   `register_core_mcp_claude`, `register_core_mcp_codex`, etc. with paths
+   inside the extension repo, and append its own `## <Section>` blocks to
+   `~/.claude/CLAUDE.md` after the core driver has written it.
 
 The lib is the only stable contract. Helpers are documented in the file
 header and remain backwards-compatible across patch releases.
@@ -206,6 +225,7 @@ header and remain backwards-compatible across patch releases.
 - Skills you authored yourself in `~/.claude/skills/` or `~/.agents/skills/` —
   install.sh only touches subdirs that match a name in this repo's `skills/`.
 - `~/.codex/config.toml` — not managed.
-- Permissions in `~/.claude/settings.json` (`allow`/`deny`/`ask`) —
-  install.sh only mutates the `hooks` block; everything else is left
-  intact.
+- Permissions in `~/.claude/settings.json` (`allow`/`deny`/`ask`) — this
+  install.sh mutates only the `hooks` block and, with `--teams`, the `env`
+  block. The `install_permission_rules` helper exists for downstream repos
+  that bring their own tools; nothing else in the file is touched.

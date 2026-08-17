@@ -10,16 +10,24 @@
 #   write_generated <target> <content>
 #   install_hook <script> <matcher> <event>
 #   remove_hook <basename> <event>
+#   install_permission_rules <allow|deny|ask> <rule> [<rule>...]
+#   install_teams_env <0|1>
+#   install_codex_review_hook <0|1>
 #   install_skills <source_root> <target_root>
 #   cleanup_legacy_codex_skills <source_root> [<source_root>...]
 #   unlink_if_repo_owned <target> <abs_source_root>
 #   inline_imports <source_file> <output_file> <prefix>=<root> [<prefix>=<root>...]
 #   language_section <lang> <templates_dir>
+#   ensure_agent_sdd
+#   register_core_mcp_claude / register_core_mcp_codex
+#
+# `ensure_mcp_npm_global <pkg> <bin>` comes from lib/npm-mcp-updates.sh,
+# sourced below.
 #
 # Public globals (set on first source):
 #   TS                   — install timestamp, used for `.bak.<TS>` backups
 #   SETTINGS             — path to ~/.claude/settings.json
-#   SETTINGS_BACKED_UP   — 0/1 flag, mutated by install_hook/remove_hook
+#   SETTINGS_BACKED_UP   — 0/1 flag, mutated by every $SETTINGS writer
 
 if [[ -z "${AGENT_CONFIG_LIB_LOADED:-}" ]]; then
   AGENT_CONFIG_LIB_LOADED=1
@@ -34,6 +42,18 @@ if [[ -z "${AGENT_CONFIG_LIB_LOADED:-}" ]]; then
   CODEX_CONFIG_TOML="${CODEX_HOME:-$HOME/.codex}/config.toml"
   CODEX_CONFIG_BACKED_UP=0
 fi
+
+# shellcheck source=npm-mcp-updates.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/npm-mcp-updates.sh"
+
+# Back up $SETTINGS once per install run (first mutation only).
+_backup_settings_once() {
+  if [[ "$SETTINGS_BACKED_UP" -eq 0 ]]; then
+    cp "$SETTINGS" "${SETTINGS}.bak.${TS}"
+    echo "  ~ backed up $SETTINGS -> ${SETTINGS}.bak.${TS}"
+    SETTINGS_BACKED_UP=1
+  fi
+}
 
 link() {
   local source="$1"
@@ -101,11 +121,7 @@ install_hook() {
     echo '{}' > "$SETTINGS"
   fi
 
-  if [[ "$SETTINGS_BACKED_UP" -eq 0 ]]; then
-    cp "$SETTINGS" "${SETTINGS}.bak.${TS}"
-    echo "  ~ backed up $SETTINGS -> ${SETTINGS}.bak.${TS}"
-    SETTINGS_BACKED_UP=1
-  fi
+  _backup_settings_once
 
   local tmp
   tmp="$(mktemp)"
@@ -154,11 +170,7 @@ remove_hook() {
     return 0
   fi
 
-  if [[ "$SETTINGS_BACKED_UP" -eq 0 ]]; then
-    cp "$SETTINGS" "${SETTINGS}.bak.${TS}"
-    echo "  ~ backed up $SETTINGS -> ${SETTINGS}.bak.${TS}"
-    SETTINGS_BACKED_UP=1
-  fi
+  _backup_settings_once
 
   local tmp
   tmp="$(mktemp)"
@@ -175,6 +187,134 @@ remove_hook() {
   ' "$SETTINGS" > "$tmp"
   mv "$tmp" "$SETTINGS"
   echo "  - hook $event ($basename) removed"
+}
+
+# Append rules to ~/.claude/settings.json permissions.<action>, preserving
+# anything the user added by hand. Idempotent: rules already present are
+# left alone. Action must be one of allow|deny|ask.
+install_permission_rules() {
+  local action="$1"
+  shift
+  local rules=("$@")
+
+  case "$action" in
+    allow|deny|ask) ;;
+    *)
+      echo "install-lib: install_permission_rules: invalid action '$action' (allow|deny|ask)" >&2
+      return 1
+      ;;
+  esac
+
+  [[ ${#rules[@]} -gt 0 ]] || return 0
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "install-lib: jq is required to manage permissions" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$SETTINGS")"
+  if [[ ! -f "$SETTINGS" ]]; then
+    echo '{}' > "$SETTINGS"
+  fi
+
+  local rules_json
+  rules_json="$(printf '%s\n' "${rules[@]}" | jq -R . | jq -s .)"
+
+  local added
+  added="$(jq -r \
+    --arg action "$action" \
+    --argjson rules "$rules_json" '
+      ((.permissions[$action] // []) | unique) as $cur
+      | ($rules - $cur) | length
+    ' "$SETTINGS")"
+
+  if [[ "$added" == "0" ]]; then
+    echo "  = permissions.$action up to date (${#rules[@]} rule(s) already present)"
+    return 0
+  fi
+
+  _backup_settings_once
+
+  local tmp
+  tmp="$(mktemp)"
+  jq --arg action "$action" --argjson rules "$rules_json" '
+    .permissions //= {}
+    | .permissions[$action] //= []
+    | .permissions[$action] = ((.permissions[$action] + $rules) | unique)
+  ' "$SETTINGS" > "$tmp"
+  mv "$tmp" "$SETTINGS"
+  echo "  + permissions.$action +$added rule(s)"
+}
+
+# Set or clear CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS in the env block of
+# ~/.claude/settings.json. Symmetric with the driver's --teams flag: 1 sets the
+# key, 0 removes it. Idempotent — no backup/write when already in the desired
+# state.
+install_teams_env() {
+  local enabled="$1"
+  echo "[claude] agent-teams env"
+
+  local key="CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "install-lib: jq is required to manage the env block" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$SETTINGS")"
+  if [[ ! -f "$SETTINGS" ]]; then
+    echo '{}' > "$SETTINGS"
+  fi
+
+  local current
+  current="$(jq -r --arg k "$key" '.env[$k] // ""' "$SETTINGS")"
+
+  if [[ "$enabled" -eq 1 ]]; then
+    if [[ "$current" == "1" ]]; then
+      echo "  = env.$key already set"
+      return 0
+    fi
+    _backup_settings_once
+    local tmp
+    tmp="$(mktemp)"
+    jq --arg k "$key" '.env //= {} | .env[$k] = "1"' "$SETTINGS" > "$tmp"
+    mv "$tmp" "$SETTINGS"
+    echo "  + env.$key=1"
+  else
+    if [[ -z "$current" ]]; then
+      echo "  = env.$key absent"
+      return 0
+    fi
+    _backup_settings_once
+    local tmp
+    tmp="$(mktemp)"
+    jq --arg k "$key" 'del(.env[$k])' "$SETTINGS" > "$tmp"
+    mv "$tmp" "$SETTINGS"
+    echo "  - env.$key removed"
+  fi
+}
+
+# Register or drop the codex commit-review hook. Symmetric with the driver's
+# --codex-review flag: 1 installs it, 0 removes it. Opt-in because the hook is
+# not a reviewer that merely reports — its second codex pass runs with
+# `-s workspace-write` and edits the working copy before the commit goes
+# through. The hook itself is fail-open and needs `codex` on PATH; without it
+# every commit passes untouched.
+install_codex_review_hook() {
+  local enabled="$1"
+  echo "[claude] codex commit review"
+
+  if [[ "$enabled" -eq 0 ]]; then
+    remove_hook "codex-commit-review.sh" "PreToolUse"
+    echo "  = hook not requested (--codex-review)"
+    return 0
+  fi
+
+  install_hook "$HOME/.claude/hooks/codex-commit-review.sh" "Bash" "PreToolUse"
+
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "  ! 'codex' not on PATH — the hook stays inert until it is installed" >&2
+  fi
 }
 
 # Symlink each repo skill from <source_root>/* into <target_root>/<name>.
@@ -560,4 +700,42 @@ json_str_object() {
       | {(.k): .v}
     ] | add // {}
   ' -- "$@"
+}
+
+# ----------------------------------------------------------------------------
+# Shared install steps
+#
+# Steps every driver repeats — the core installer and downstream extension
+# installers both need them, and neither delegates to the other's install.sh.
+# ----------------------------------------------------------------------------
+
+# Install the agent-sdd npm package globally so the `sdd` bin lands on PATH.
+# agent-sdd is the distribution point for the SDD methodology; the driver runs
+# `sdd install <mode>` afterwards.
+ensure_agent_sdd() {
+  echo "[agent-sdd]"
+  ensure_npm_global "agent-sdd" "sdd" >/dev/null \
+    || echo "  ! sdd not on PATH after npm install -g agent-sdd" >&2
+}
+
+# Register the code-skeleton MCP referenced by rules/code-navigation.md, if its
+# bin made it onto PATH.
+register_core_mcp_claude() {
+  local cs_bin
+  cs_bin="$(command -v code-skeleton-mcp 2>/dev/null || true)"
+  if [[ -z "$cs_bin" ]]; then
+    echo "  ! code-skeleton-mcp not on PATH; skip claude registration" >&2
+    return 0
+  fi
+  register_mcp_claude "code-skeleton" "$cs_bin" "[]" "{}"
+}
+
+register_core_mcp_codex() {
+  local cs_bin
+  cs_bin="$(command -v code-skeleton-mcp 2>/dev/null || true)"
+  if [[ -z "$cs_bin" ]]; then
+    echo "  ! code-skeleton-mcp not on PATH; skip codex registration" >&2
+    return 0
+  fi
+  register_mcp_codex "code-skeleton" "$cs_bin" "[]" "{}"
 }

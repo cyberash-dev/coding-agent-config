@@ -2,7 +2,8 @@
 # Install symlinks from this repo into per-user agent config locations and
 # register hooks in ~/.claude/settings.json.
 #
-# Usage: install.sh <claude|codex|all> [--sdd] [--lang=ru|en]
+# Usage: install.sh <claude|codex|all> [--sdd] [--teams] [--codex-review]
+#                   [--update-mcps] [--lang=ru|en]
 #
 # --lang  Pin the agent's reply language. Without it, the agent replies in
 #         whatever language the operator used. With `--lang=ru` or
@@ -13,6 +14,21 @@
 #         tooling) globally so the `sdd` bin lands on PATH, then run
 #         `sdd install <mode>`. agent-sdd installs its own rules, skill,
 #         and hooks for the chosen target(s).
+#
+# --teams Set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in the env block of
+#         ~/.claude/settings.json (claude/all only). Without the flag, the
+#         key is removed.
+#
+# --codex-review
+#         Register the codex-commit-review PreToolUse hook, which runs every
+#         `git commit` / `arc commit` through codex twice: a review pass and a
+#         workspace-write pass that edits the files. It speaks the Claude Code
+#         hook protocol, so the flag applies to claude/all and is inert for the
+#         codex mode. Without the flag, the hook is removed.
+#
+# --update-mcps
+#         Update already installed npm-backed MCP packages to npm latest
+#         without prompting instead of asking per package.
 #
 # Hooks: install.sh always installs hooks from `hooks/`. Hook registration
 # in settings.json is idempotent — entries pointing at the canonical paths
@@ -33,7 +49,7 @@ source "$REPO_ROOT/scripts/lib/install-lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 <claude|codex|all> [--sdd] [--lang=ru|en]
+Usage: $0 <claude|codex|all> [--sdd] [--teams] [--codex-review] [--update-mcps] [--lang=ru|en]
 
   claude   generate ~/.claude/CLAUDE.md, symlink ~/.claude/rules and
            ~/.claude/hooks
@@ -46,6 +62,13 @@ Usage: $0 <claude|codex|all> [--sdd] [--lang=ru|en]
   --sdd    install the \`agent-sdd\` npm package globally, then run
            \`sdd install <mode>\` so agent-sdd installs its own
            SDD rules, skill, and hooks.
+  --teams  set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in the env block of
+           ~/.claude/settings.json (claude/all only)
+  --codex-review
+           register the codex-commit-review PreToolUse hook: every commit is
+           reviewed by codex, which then edits the files (claude/all only)
+  --update-mcps
+           update npm-backed MCP packages without prompting per package
 EOF
   exit 2
 }
@@ -54,6 +77,9 @@ EOF
 
 MODE="$1"; shift
 SDD=0
+TEAMS=0
+CODEX_REVIEW=0
+UPDATE_MCPS=0
 LANG_MODE=default
 
 while [[ $# -gt 0 ]]; do
@@ -61,6 +87,9 @@ while [[ $# -gt 0 ]]; do
     --sdd)
       SDD=1; shift
       ;;
+    --teams) TEAMS=1; shift ;;
+    --codex-review) CODEX_REVIEW=1; shift ;;
+    --update-mcps) UPDATE_MCPS=1; shift ;;
     --lang=*)
       LANG_MODE="${1#--lang=}"
       case "$LANG_MODE" in ru|en) ;; *) usage ;; esac
@@ -70,41 +99,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
+# The review hook speaks the Claude Code hook protocol and is registered in
+# ~/.claude/settings.json, so the codex mode has nowhere to put it. Say so
+# instead of accepting the flag and doing nothing.
+if [[ "$CODEX_REVIEW" -eq 1 && "$MODE" == "codex" ]]; then
+  echo "install.sh: --codex-review applies to claude/all; ignored for the codex mode" >&2
+fi
 
-# Install the agent-sdd package globally so the `sdd` bin lands on PATH.
-ensure_agent_sdd() {
-  echo "[agent-sdd]"
-  ensure_npm_global "agent-sdd" "sdd" >/dev/null \
-    || echo "  ! sdd not on PATH after npm install -g agent-sdd" >&2
-}
+CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
 
 # MCP servers referenced by core rules (rules/code-navigation.md → code-skeleton).
 # Each entry is registered in ~/.claude.json or ~/.codex/config.toml depending
 # on the install mode, after a single global npm install.
 ensure_core_mcp_packages() {
   echo "[mcp/core]"
-  ensure_npm_global "code-skeleton-mcp" "code-skeleton-mcp" >/dev/null || true
-}
-
-register_core_mcp_claude() {
-  local cs_bin
-  cs_bin="$(command -v code-skeleton-mcp 2>/dev/null || true)"
-  if [[ -z "$cs_bin" ]]; then
-    echo "  ! code-skeleton-mcp not on PATH; skip claude registration" >&2
-    return 0
-  fi
-  register_mcp_claude "code-skeleton" "$cs_bin" "[]" "{}"
-}
-
-register_core_mcp_codex() {
-  local cs_bin
-  cs_bin="$(command -v code-skeleton-mcp 2>/dev/null || true)"
-  if [[ -z "$cs_bin" ]]; then
-    echo "  ! code-skeleton-mcp not on PATH; skip codex registration" >&2
-    return 0
-  fi
-  register_mcp_codex "code-skeleton" "$cs_bin" "[]" "{}"
+  ensure_mcp_npm_global "code-skeleton-mcp" "code-skeleton-mcp" >/dev/null || true
 }
 
 install_claude() {
@@ -117,8 +126,10 @@ install_claude() {
 
   remove_hook "lsp-reminder.sh" "PreToolUse"
   install_hook "$HOME/.claude/hooks/code-navigation-reminder.sh" "Grep|Read" "PreToolUse"
+  install_codex_review_hook "$CODEX_REVIEW"
 
   register_core_mcp_claude
+  install_teams_env "$TEAMS"
 }
 
 install_codex() {
