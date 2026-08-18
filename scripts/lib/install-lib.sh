@@ -12,11 +12,13 @@
 #   remove_hook <basename> <event>
 #   install_permission_rules <allow|deny|ask> <rule> [<rule>...]
 #   install_teams_env <0|1>
+#   install_codex_subagents <0|1>
 #   install_codex_review_hook <0|1>
 #   install_skills <source_root> <target_root>
 #   cleanup_legacy_codex_skills <source_root> [<source_root>...]
 #   unlink_if_repo_owned <target> <abs_source_root>
 #   inline_imports <source_file> <output_file> <prefix>=<root> [<prefix>=<root>...]
+#   teams_section <0|1> <templates_dir>
 #   language_section <lang> <templates_dir>
 #   ensure_agent_sdd
 #   mcp_launch_spec <pkg> <bin>
@@ -372,6 +374,127 @@ install_teams_env() {
   fi
 }
 
+# Make Codex able to delegate: the `multi_agent` feature and `agents.enabled`
+# are two independent gates, and either one left off keeps `spawn_agent` away
+# from the model. Asymmetric with the driver's --teams flag on purpose: 0 leaves
+# the config alone, because both gates default to on and clearing them would
+# silently undo a deliberate opt-out. Idempotent — nothing is written when both
+# gates are already on.
+install_codex_subagents() {
+  local enabled="$1"
+  echo "[codex] sub-agents"
+
+  if [[ "$enabled" -eq 0 ]]; then
+    echo "  = config left as-is (--teams not requested)"
+    return 0
+  fi
+
+  _enable_codex_multi_agent_feature
+  _enable_codex_agents_key
+}
+
+# Turn the `multi_agent` feature on through codex itself: it owns a real TOML
+# writer, so the key lands correctly whatever shape the file is in.
+_enable_codex_multi_agent_feature() {
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "  ! 'codex' not on PATH; cannot verify the multi_agent feature" >&2
+    return 0
+  fi
+
+  # An older codex without `features list` must degrade to "state unknown", not
+  # abort a driver running under `set -euo pipefail`.
+  local codex_home state
+  codex_home="$(dirname "$CODEX_CONFIG_TOML")"
+  state="$(CODEX_HOME="$codex_home" codex features list 2>/dev/null \
+    | awk '$1 == "multi_agent" { print $NF; exit }')" || state=""
+
+  if [[ "$state" == "true" ]]; then
+    echo "  = features.multi_agent already enabled"
+    return 0
+  fi
+
+  _backup_codex_config_once
+  if CODEX_HOME="$codex_home" codex features enable multi_agent >/dev/null 2>&1; then
+    echo "  + features.multi_agent enabled"
+  else
+    echo "  ! 'codex features enable multi_agent' failed" >&2
+  fi
+}
+
+# Set `agents.enabled = true`, in whichever shape the key already exists.
+_enable_codex_agents_key() {
+  if [[ "$(_codex_agents_enabled)" == "true" ]]; then
+    echo "  = agents.enabled already true"
+    return 0
+  fi
+
+  # An inline `agents = { ... }` owns the whole table, so neither appending a
+  # [agents] header nor rewriting a dotted key is safe. Say so and change nothing.
+  if [[ -f "$CODEX_CONFIG_TOML" ]] && grep -qE '^[[:space:]]*agents[[:space:]]*=' "$CODEX_CONFIG_TOML"; then
+    echo "  ! agents is an inline table; set agents.enabled = true by hand" >&2
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$CODEX_CONFIG_TOML")"
+  [[ -f "$CODEX_CONFIG_TOML" ]] || : > "$CODEX_CONFIG_TOML"
+
+  _backup_codex_config_once
+
+  local tmp
+  tmp="$(mktemp)"
+  awk '
+    BEGIN { in_agents = 0; written = 0 }
+    !written && /^[[:space:]]*agents\.enabled[[:space:]]*=/ {
+      print "agents.enabled = true"
+      written = 1
+      next
+    }
+    /^[[:space:]]*\[/ {
+      if (!written && $0 ~ /^[[:space:]]*\[agents\][[:space:]]*(#.*)?$/) {
+        print
+        print "enabled = true"
+        in_agents = 1
+        written = 1
+        next
+      }
+      in_agents = 0
+      print
+      next
+    }
+    in_agents && /^[[:space:]]*enabled[[:space:]]*=/ { next }
+    { print }
+    END {
+      if (!written) {
+        if (NR > 0) print ""
+        print "[agents]"
+        print "enabled = true"
+      }
+    }
+  ' "$CODEX_CONFIG_TOML" > "$tmp"
+  mv "$tmp" "$CODEX_CONFIG_TOML"
+  echo "  + agents.enabled=true"
+}
+
+# Current value of `agents.enabled`, or empty when it is not set. Reads both the
+# `[agents]` table and the dotted top-level form; role subtables
+# (`[agents.<name>]`) are a different table and are ignored.
+_codex_agents_enabled() {
+  [[ -f "$CODEX_CONFIG_TOML" ]] || return 0
+
+  awk '
+    BEGIN { in_agents = 0 }
+    /^[[:space:]]*agents\.enabled[[:space:]]*=/ { key = $0 }
+    /^[[:space:]]*\[/ { in_agents = ($0 ~ /^[[:space:]]*\[agents\][[:space:]]*(#.*)?$/); next }
+    in_agents && /^[[:space:]]*enabled[[:space:]]*=/ { key = $0; exit }
+    END {
+      if (key == "") exit
+      sub(/^[^=]*=[[:space:]]*/, "", key)
+      sub(/[[:space:]]*(#.*)?$/, "", key)
+      print key
+    }
+  ' "$CODEX_CONFIG_TOML"
+}
+
 # Register or drop the codex commit-review hook. Symmetric with the driver's
 # --codex-review flag: 1 installs it, 0 removes it. Opt-in because the hook is
 # not a reviewer that merely reports — its second codex pass runs with
@@ -517,6 +640,22 @@ inline_imports() {
     }
     { print }
   ' "$source_file" > "$output_file"
+}
+
+# Print the orchestration section for <enabled> (0|1), read from
+# <templates_dir>/<off|on>.md. The off fragment is empty, so without --teams the
+# section vanishes from the generated CLAUDE.md and AGENTS.md entirely.
+teams_section() {
+  local enabled="$1"
+  local templates_dir="$2"
+  local fragment=off
+  [[ "$enabled" -eq 1 ]] && fragment=on
+  local file="$templates_dir/${fragment}.md"
+  if [[ ! -f "$file" ]]; then
+    echo "install-lib: unknown teams fragment: $file" >&2
+    exit 1
+  fi
+  cat "$file"
 }
 
 # Print the output-language directive section for <lang>, read from

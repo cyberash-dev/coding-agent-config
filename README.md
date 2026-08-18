@@ -23,7 +23,8 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 ├── hooks/              # hooks installed unconditionally
 ├── skills/             # SKILL.md bundles, symlinked per-skill into both agents
 ├── templates/          # generation fragments (not symlinked into agents)
-│   └── language/       #   reply-language directive, selected by --lang
+│   ├── language/       #   reply-language directive, selected by --lang
+│   └── teams/          #   orchestration section, selected by --teams
 ├── build/              # generated, gitignored
 │   └── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
 ├── tests/              # shell tests for the install libs (`bash tests/<name>.test.sh`)
@@ -129,7 +130,7 @@ cd ~/Projects/coding-agent-config
 | *(none)* | universal rules + `hooks/`. Agent uses built-in git knowledge. |
 | `--lang=ru\|en` | pin the agent's reply language. Omitted, the agent replies in the operator's own language; set, it always replies in Russian or English. |
 | `--sdd` | install the `agent-sdd` npm package globally, then run `sdd install <mode>`. agent-sdd installs its own rules, skill, and hooks. |
-| `--teams` | set `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (claude/all). Omitted, the key is removed. |
+| `--teams` | delegation-first setup for both agents: adds `rules/orchestration.md` to the generated `CLAUDE.md` / `AGENTS.md`, sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (omitted, the key is removed), and turns both Codex gates on in `~/.codex/config.toml` — `features.multi_agent` and `agents.enabled` (omitted, the config is left as-is). See [Orchestration](#orchestration). |
 | `--codex-review` | register the `codex-commit-review.sh` `PreToolUse` hook (claude/all). Omitted, the hook is removed. |
 | `--update-mcps` | update npm-backed MCP packages to `latest` without asking per package. |
 
@@ -147,6 +148,7 @@ Windows. "symlink" means a junction on Windows (see
 | Claude Code | `$AGENT_HOME/.claude/settings.json` (mutated) | hook entries idempotently upserted; `env` with `--teams` |
 | Claude Code | `$AGENT_HOME/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`          |
 | Codex CLI / IDE | `${CODEX_HOME:-$AGENT_HOME/.codex}/AGENTS.md` (symlink, copy on Windows) | `build/AGENTS.md` |
+| Codex CLI / IDE | `${CODEX_HOME:-$AGENT_HOME/.codex}/config.toml` (mutated) | `[mcp_servers.<name>]`; `features.multi_agent` + `agents.enabled` with `--teams` |
 | Codex CLI / IDE | `$AGENT_HOME/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`      |
 
 With `--sdd`, agent-sdd writes its own targets on top of the above
@@ -215,6 +217,33 @@ resolved).
 If `npm install -g` fails (no network, missing registry auth, etc.), the
 MCP is skipped with a warning rather than aborting the whole install.
 
+## Orchestration
+
+Both agents can run sub-agents, and both are conservative about it by default.
+`--teams` flips two independent things: the runtime switch, and the standing
+authorization that makes the agent actually use it.
+
+| | Runtime switch | Authorization |
+|---|---|---|
+| Claude Code | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — a sub-agent that Claude names becomes a teammate: own session, own context, direct messaging, shared task list | `rules/orchestration.md`, imported from the generated `~/.claude/CLAUDE.md` |
+| Codex | `features.multi_agent` and `agents.enabled` — two independent gates, either one off keeps `spawn_agent` away from the model. Both ship on, so this only undoes a deliberate opt-out | the same rule, inlined into `~/.codex/AGENTS.md` |
+
+The authorization half is not decoration. Codex ships this in the description
+of its `spawn_agent` tool:
+
+> Do not spawn sub-agents unless the user or applicable AGENTS.md/skill
+> instructions explicitly ask for sub-agents, delegation, or parallel agent
+> work. Requests for depth, thoroughness, research, investigation, or detailed
+> codebase analysis do not count as permission to spawn.
+
+So `AGENTS.md` is the sanctioned channel for granting it, and the wording has
+to name delegation outright. Codex role files (`~/.codex/agents/*.toml`) do not
+help here — they pick *which* agent runs once spawning is already authorized.
+
+Two harness limits worth knowing: Claude Code spawns teammates only in an
+interactive session (under `-p` a named sub-agent is an ordinary sub-agent),
+and teammates cannot spawn teammates of their own.
+
 ## Editing rules
 
 Edit files under `rules/` or `hooks/` directly. Claude Code picks up
@@ -240,7 +269,7 @@ remove the stale global package first if you need to force a downgrade).
 
 ```bash
 ./scripts/install.sh claude [--sdd] [--teams] [--codex-review] [--lang=ru|en]
-./scripts/install.sh codex  [--sdd] [--lang=ru|en]   # only Codex (also runs build)
+./scripts/install.sh codex  [--sdd] [--teams] [--lang=ru|en]   # only Codex (also runs build)
 ./scripts/install.sh all    [--sdd] [--teams] [--codex-review] [--lang=ru|en]
 ```
 
@@ -273,7 +302,8 @@ this install should:
 2. `source <submodule>/scripts/lib/install-lib.sh` from its own
    `scripts/install.sh`.
 3. Call `link`, `install_hook`, `install_skills`, `install_permission_rules`,
-   `install_teams_env`, `install_codex_review_hook`, `ensure_mcp_npm_global`,
+   `install_teams_env`, `install_codex_subagents`, `install_codex_review_hook`,
+   `teams_section`, `ensure_mcp_npm_global`,
    `ensure_agent_sdd`, `mcp_launch_spec`, `register_mcp_claude`,
    `register_mcp_codex`, `register_core_mcp_claude`, `register_core_mcp_codex`,
    etc. with paths inside the extension repo, and append its own
@@ -294,7 +324,10 @@ header and remain backwards-compatible across patch releases.
   `~/.claude/projects/*/memory/` — not managed by this repo.
 - Skills you authored yourself in `~/.claude/skills/` or `~/.agents/skills/` —
   install.sh only touches subdirs that match a name in this repo's `skills/`.
-- `~/.codex/config.toml` — not managed.
+- `~/.codex/config.toml` — only `[mcp_servers.<name>]` and, with `--teams`,
+  `features.multi_agent` (written by `codex features enable`) and
+  `agents.enabled`. Everything else, including `[agents.<name>]` role
+  declarations, is left untouched.
 - Permissions in `~/.claude/settings.json` (`allow`/`deny`/`ask`) — this
   install.sh mutates only the `hooks` block and, with `--teams`, the `env`
   block. The `install_permission_rules` helper exists for downstream repos

@@ -15,9 +15,14 @@
 #         `sdd install <mode>`. agent-sdd installs its own rules, skill,
 #         and hooks for the chosen target(s).
 #
-# --teams Set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in the env block of
-#         ~/.claude/settings.json (claude/all only). Without the flag, the
-#         key is removed.
+# --teams Turn delegation on in both harnesses. Sets
+#         CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in the env block of
+#         ~/.claude/settings.json (without the flag, the key is removed) and
+#         both Codex gates — features.multi_agent and agents.enabled — in
+#         ~/.codex/config.toml (without the flag, the config is left as-is).
+#         It also adds rules/orchestration.md to the generated CLAUDE.md /
+#         AGENTS.md — the standing authorization both agents need before they
+#         delegate on their own.
 #
 # --codex-review
 #         Register the codex-commit-review PreToolUse hook, which runs every
@@ -62,8 +67,10 @@ Usage: $0 <claude|codex|all> [--sdd] [--teams] [--codex-review] [--update-mcps] 
   --sdd    install the \`agent-sdd\` npm package globally, then run
            \`sdd install <mode>\` so agent-sdd installs its own
            SDD rules, skill, and hooks.
-  --teams  set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in the env block of
-           ~/.claude/settings.json (claude/all only)
+  --teams  install rules/orchestration.md into the generated instructions and
+           turn delegation on: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in
+           ~/.claude/settings.json, features.multi_agent + agents.enabled in
+           ~/.codex/config.toml
   --codex-review
            register the codex-commit-review PreToolUse hook: every commit is
            reviewed by codex, which then edits the files (claude/all only)
@@ -138,7 +145,9 @@ ensure_core_mcp_packages() {
 install_claude() {
   echo "[claude]"
   write_generated "$AGENT_HOME/.claude/CLAUDE.md" \
-    "$(cat "$REPO_ROOT/CLAUDE.md"; printf '\n'; language_section "$LANG_MODE" "$REPO_ROOT/templates/language")"
+    "$(cat "$REPO_ROOT/CLAUDE.md"; printf '\n'; \
+       teams_section "$TEAMS" "$REPO_ROOT/templates/teams"; \
+       language_section "$LANG_MODE" "$REPO_ROOT/templates/language")"
   link "$REPO_ROOT/rules" "$AGENT_HOME/.claude/rules"
   link "$REPO_ROOT/hooks" "$AGENT_HOME/.claude/hooks"
   install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.claude/skills"
@@ -153,12 +162,15 @@ install_claude() {
 
 install_codex() {
   echo "[codex]"
-  "$REPO_ROOT/scripts/build.sh" --lang="$LANG_MODE"
+  local build_args=(--lang="$LANG_MODE")
+  [[ "$TEAMS" -eq 1 ]] && build_args+=(--teams)
+  "$REPO_ROOT/scripts/build.sh" "${build_args[@]}"
   link "$REPO_ROOT/build/AGENTS.md" "$CODEX_CONFIG_DIR/AGENTS.md"
   install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.agents/skills"
   cleanup_legacy_codex_skills "$REPO_ROOT/skills"
 
   register_core_mcp_codex
+  install_codex_subagents "$TEAMS"
 }
 
 case "$MODE" in
