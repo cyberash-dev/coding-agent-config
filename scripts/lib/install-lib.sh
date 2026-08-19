@@ -14,6 +14,7 @@
 #   install_teams_env <0|1>
 #   install_codex_subagents <0|1>
 #   install_codex_review_hook <0|1>
+#   install_codex_review_skills <0|1> <source_root> <target_root>
 #   install_skills <source_root> <target_root>
 #   cleanup_legacy_codex_skills <source_root> [<source_root>...]
 #   unlink_if_repo_owned <target> <abs_source_root>
@@ -516,6 +517,29 @@ install_codex_review_hook() {
   if ! command -v codex >/dev/null 2>&1; then
     echo "  ! 'codex' not on PATH — the hook stays inert until it is installed" >&2
   fi
+}
+
+# Install or drop the review skills under <target_root>. Symmetric with the
+# driver's --codex-review flag: 1 links them, 0 removes the links this repo owns
+# and leaves same-name skills the user wrote by hand alone. They ship with the
+# hook because the hook runs its review pass through the codex-cli-review script.
+install_codex_review_skills() {
+  local enabled="$1"
+  local source_root="$2"
+  local target_root="$3"
+  echo "[skills] codex review"
+
+  if [[ "$enabled" -eq 1 ]]; then
+    install_skills "$source_root" "$target_root"
+    return 0
+  fi
+
+  local src
+  for src in "$source_root"/*/; do
+    [[ -d "$src" ]] || continue
+    unlink_if_repo_owned "$target_root/$(basename "$src")" "${src%/}"
+  done
+  echo "  = skills not requested (--codex-review)"
 }
 
 # Symlink each repo skill from <source_root>/* into <target_root>/<name>.

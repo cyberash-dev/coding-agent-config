@@ -25,11 +25,13 @@
 #         delegate on their own.
 #
 # --codex-review
-#         Register the codex-commit-review PreToolUse hook, which runs every
-#         `git commit` / `arc commit` through codex twice: a review pass and a
-#         workspace-write pass that edits the files. It speaks the Claude Code
-#         hook protocol, so the flag applies to claude/all and is inert for the
-#         codex mode. Without the flag, the hook is removed.
+#         Install the review bundle from `codex-review/`: the code-review and
+#         codex-cli-review skills, plus the codex-commit-review PreToolUse hook,
+#         which runs every `git commit` / `arc commit` through codex twice — a
+#         review pass driven by the codex-cli-review skill and a workspace-write
+#         pass that edits the files. The skills land on both surfaces; the hook
+#         speaks the Claude Code hook protocol, so it is registered for
+#         claude/all only. Without the flag, both are removed.
 #
 # --update-mcps
 #         Update already installed npm-backed MCP packages to npm latest
@@ -72,8 +74,9 @@ Usage: $0 <claude|codex|all> [--sdd] [--teams] [--codex-review] [--update-mcps] 
            ~/.claude/settings.json, features.multi_agent + agents.enabled in
            ~/.codex/config.toml
   --codex-review
-           register the codex-commit-review PreToolUse hook: every commit is
-           reviewed by codex, which then edits the files (claude/all only)
+           install the code-review and codex-cli-review skills, and register the
+           codex-commit-review PreToolUse hook: every commit is reviewed by
+           codex, which then edits the files (the hook is claude/all only)
   --update-mcps
            update npm-backed MCP packages without prompting per package
 EOF
@@ -107,13 +110,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 # The review hook speaks the Claude Code hook protocol and is registered in
-# ~/.claude/settings.json, so the codex mode has nowhere to put it. Say so
-# instead of accepting the flag and doing nothing.
+# ~/.claude/settings.json, so the codex mode has nowhere to put it. Say what the
+# flag does there instead of leaving the missing hook unexplained.
 if [[ "$CODEX_REVIEW" -eq 1 && "$MODE" == "codex" ]]; then
-  echo "install.sh: --codex-review applies to claude/all; ignored for the codex mode" >&2
+  echo "install.sh: --codex-review installs the review skills; the commit hook is claude/all only" >&2
 fi
 
 CODEX_CONFIG_DIR="${CODEX_HOME:-$AGENT_HOME/.codex}"
+REVIEW_SKILLS="$REPO_ROOT/codex-review/skills"
 
 # Every writer below needs jq and awk. Bail before the first mutation instead of
 # aborting halfway through, with links already created and hooks not registered.
@@ -151,6 +155,7 @@ install_claude() {
   link "$REPO_ROOT/rules" "$AGENT_HOME/.claude/rules"
   link "$REPO_ROOT/hooks" "$AGENT_HOME/.claude/hooks"
   install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.claude/skills"
+  install_codex_review_skills "$CODEX_REVIEW" "$REVIEW_SKILLS" "$AGENT_HOME/.claude/skills"
 
   remove_hook "lsp-reminder.sh" "PreToolUse"
   install_hook "$AGENT_HOME/.claude/hooks/code-navigation-reminder.sh" "Grep|Read" "PreToolUse"
@@ -167,7 +172,8 @@ install_codex() {
   "$REPO_ROOT/scripts/build.sh" "${build_args[@]}"
   link "$REPO_ROOT/build/AGENTS.md" "$CODEX_CONFIG_DIR/AGENTS.md"
   install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.agents/skills"
-  cleanup_legacy_codex_skills "$REPO_ROOT/skills"
+  install_codex_review_skills "$CODEX_REVIEW" "$REVIEW_SKILLS" "$AGENT_HOME/.agents/skills"
+  cleanup_legacy_codex_skills "$REPO_ROOT/skills" "$REVIEW_SKILLS"
 
   register_core_mcp_codex
   install_codex_subagents "$TEAMS"

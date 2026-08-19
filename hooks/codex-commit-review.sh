@@ -5,9 +5,13 @@
 # permissionDecision:"allow" and puts the review plus the fix report into
 # additionalContext. Fail-open: when codex fails the commit goes through as is,
 # with a warning.
-#   git review: codex exec -s read-only -C <root> review --uncommitted
-#   arc review: arc diff | codex exec --skip-git-repo-check -s read-only -C <root> "<prompt>"
-#   fixes:      <review> | codex exec -s workspace-write -C <root> "<fix-prompt>"
+#   review: python3 <codex-cli-review skill>/scripts/codex_review.py
+#             --cwd <root> --scope-file <status + diff>
+#   fixes:  <review> | codex exec -s workspace-write -C <root> "<fix-prompt>"
+#
+# The review pass owns no policy of its own: the skill script starts a read-only
+# codex on the supplied scope under $code-review and returns the review as JSON.
+# Both are installed together by `install.sh --codex-review`.
 #
 # Kill switches (any one of them makes the hook exit quietly, and the commit
 # takes its normal path):
@@ -16,7 +20,7 @@
 #   the file ~/.claude/codex-commit-review.disabled — created/removed on the
 #     fly, path overridable through CODEX_COMMIT_REVIEW_FLAG;
 #   codex not installed;
-#   jq not installed.
+#   jq or python3 not installed.
 # The install anchors .claude at %USERPROFILE% on Windows, because Git Bash
 # derives $HOME from HOMEDRIVE/HOMEPATH. Follow it, or the kill switch lands in
 # a directory the agent never reads. Same rule as scripts/lib/platform.sh; this
@@ -32,6 +36,7 @@ CODEX_COMMIT_REVIEW_FLAG="${CODEX_COMMIT_REVIEW_FLAG:-$(agent_home)/.claude/code
 [[ "$CODEX_COMMIT_REVIEW_DISABLED" == "1" ]] && exit 0
 [[ -e "$CODEX_COMMIT_REVIEW_FLAG" ]] && exit 0
 command -v jq >/dev/null 2>&1 || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
 
 input=$(cat)
 tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')
@@ -143,7 +148,7 @@ cleanup() { [[ -s "$TMPLIST" ]] && xargs rm -f <"$TMPLIST" 2>/dev/null; rm -f "$
 trap cleanup EXIT
 
 CODEX_REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-600}"
-run_codex() {
+run_with_timeout() {
   local stdin_file="$1" out_file="$2" err_file="$3"
   shift 3
   "$@" <"${stdin_file:-/dev/null}" >"$out_file" 2>"$err_file" &
@@ -164,37 +169,42 @@ run_codex() {
 
 out=$(mktmp)
 err=$(mktmp)
-rc=0
 
 if [[ "$vcs" == "git" ]]; then
-  repo_root=$(git -C "$target_dir" rev-parse --show-toplevel 2>/dev/null) || true
-  [[ -z "$repo_root" ]] && allow "git commit: repository not found; review skipped." \
+  vcs_root=$(git -C "$target_dir" rev-parse --show-toplevel 2>/dev/null) || true
+  [[ -z "$vcs_root" ]] && allow "git commit: repository not found; review skipped." \
     "git commit, but no git repository was found from $target_dir. No review and no auto-fixes ran, the commit goes through as is."
-  [[ -z "$(git -C "$repo_root" status --short 2>/dev/null)" ]] && exit 0
-  vcs_root="$repo_root"
-
-  run_codex "" "$out" "$err" \
-    "$CODEX_BIN" exec -s read-only -C "$repo_root" review --uncommitted
-  rc=$?
 else
-  arc_root=$( (cd "$target_dir" 2>/dev/null && arc rev-parse --show-toplevel 2>/dev/null) )
-  [[ -z "$arc_root" ]] && arc_root=$( (cd "$target_dir" 2>/dev/null && arc root 2>/dev/null) )
-  [[ -z "$arc_root" ]] && allow "arc commit: working copy not found; review skipped." \
+  vcs_root=$( (cd "$target_dir" 2>/dev/null && arc rev-parse --show-toplevel 2>/dev/null) )
+  [[ -z "$vcs_root" ]] && vcs_root=$( (cd "$target_dir" 2>/dev/null && arc root 2>/dev/null) )
+  [[ -z "$vcs_root" ]] && allow "arc commit: working copy not found; review skipped." \
     "arc commit, but no arc working copy was found from $target_dir. No review and no auto-fixes ran, the commit goes through as is."
-  [[ -z "$( (cd "$arc_root" && arc status --short 2>/dev/null) )" ]] && exit 0
-  vcs_root="$arc_root"
-
-  diff_file=$(mktmp)
-  # Review what actually goes into the commit: the staged diff (`arc commit`
-  # commits the index). The unstaged fallback covers the `arc commit -a`
-  # workflow without a preceding `arc add`. Otherwise the unstaged diff is
-  # empty after `arc add` and codex has nothing to review.
-  (cd "$arc_root" && { arc diff --cached 2>/dev/null; arc diff 2>/dev/null; }) >"$diff_file"
-  run_codex "$diff_file" "$out" "$err" \
-    "$CODEX_BIN" exec --skip-git-repo-check -s read-only -C "$arc_root" \
-    "You are a strict code reviewer. The <stdin> block holds the diff of uncommitted changes in an arc working copy. Do a code review: first the findings ordered by severity (critical -> minor), each with file:line, then a short summary. If there is nothing to report, say so explicitly. Note that untracked files may be missing from the diff."
-  rc=$?
 fi
+
+vcs_status=$( (cd "$vcs_root" && "$vcs" status --short 2>/dev/null) )
+[[ -z "$vcs_status" ]] && exit 0
+
+REVIEW_SCRIPT="$(agent_home)/.claude/skills/codex-cli-review/scripts/codex_review.py"
+[[ -f "$REVIEW_SCRIPT" ]] || allow "codex-cli-review skill is not installed; review skipped." \
+  "The codex-cli-review skill is missing at $REVIEW_SCRIPT, so no review and no auto-fixes ran before the $vcs commit. Re-run install.sh with --codex-review. The commit goes through as is."
+
+scope_file=$(mktmp)
+{
+  printf 'Review the current uncommitted %s working-copy changes.\nRepository root: %s\n\n' "$vcs" "$vcs_root"
+  printf '<%s_status>\n%s\n</%s_status>\n\n' "$vcs" "$vcs_status" "$vcs"
+  printf '<%s_diff>\n' "$vcs"
+  # Review what actually goes into the commit: the staged diff (`commit` commits
+  # the index). The unstaged half covers the `commit -a` workflow without a
+  # preceding `add`. Otherwise the unstaged diff is empty after `add` and codex
+  # has nothing to review.
+  (cd "$vcs_root" && { "$vcs" diff --cached 2>/dev/null; "$vcs" diff 2>/dev/null; })
+  printf '</%s_diff>\n\n' "$vcs"
+  printf 'Inspect the exact untracked files listed by status. Read unchanged files only when needed to verify a finding. Do not scan unrelated directories.\n'
+} >"$scope_file"
+
+run_with_timeout "" "$out" "$err" \
+  python3 "$REVIEW_SCRIPT" --cwd "$vcs_root" --scope-file "$scope_file"
+rc=$?
 
 review=$(cat "$out")
 
@@ -219,11 +229,13 @@ done < <( (cd "$vcs_root" && "$vcs" diff --cached --name-only 2>/dev/null) )
 
 fix_out=$(mktmp)
 fix_err=$(mktmp)
-fix_args=("$CODEX_BIN" exec)
+# CODE_REVIEW_HOOK_ACTIVE stops this codex from starting its own review through
+# the codex-cli-review skill: the review it has to apply already ran.
+fix_args=(env CODE_REVIEW_HOOK_ACTIVE=1 "$CODEX_BIN" exec)
 [[ "$vcs" == "arc" ]] && fix_args+=(--skip-git-repo-check)
 fix_args+=(-s workspace-write -C "$vcs_root")
-run_codex "$out" "$fix_out" "$fix_err" "${fix_args[@]}" \
-  "You are a senior engineer. The <stdin> block holds a code review of the uncommitted changes in this working copy. Apply the fixes straight into the files: only objective, local findings (bugs, logic errors, crashes, leaks, contract violations, typos in identifiers). Do NOT apply stylistic or taste findings, do not refactor beyond the touched changes, do not bend tests to the implementation, do not revert the author's changes, do not create new files. If there is nothing to apply, change nothing. Finish with a report: a line 'APPLIED:' listing (file:line - what was done) and a line 'SKIPPED:' listing the rest with a reason."
+run_with_timeout "$out" "$fix_out" "$fix_err" "${fix_args[@]}" \
+  "You are a senior engineer. The <stdin> block holds a JSON code review (findings[] with priority, file, line, body and remediation) of the uncommitted changes in this working copy. Apply the fixes straight into the files: only objective, local findings (bugs, logic errors, crashes, leaks, contract violations, typos in identifiers). Do NOT apply stylistic or taste findings, do not refactor beyond the touched changes, do not bend tests to the implementation, do not revert the author's changes, do not create new files. If there is nothing to apply, change nothing. Finish with a report: a line 'APPLIED:' listing (file:line - what was done) and a line 'SKIPPED:' listing the rest with a reason."
 fix_rc=$?
 
 fix_report=$(cat "$fix_out")
@@ -246,7 +258,7 @@ restaged_text="(nothing)"
 allow "Codex: review done, fixes applied automatically (files re-staged: ${#restaged[@]})." \
   "Codex review and auto-fixes before the commit ($vcs, $vcs_root):
 
-=== REVIEW ===
+=== REVIEW (JSON) ===
 $review
 
 === AUTO-FIX REPORT ===

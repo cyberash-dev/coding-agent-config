@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex CLI Review"
+  short_description: "Run VCS-neutral reviews through Codex CLI"
+  default_prompt: "Use $codex-cli-review to review an explicit change scope through Codex CLI."

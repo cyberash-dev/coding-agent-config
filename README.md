@@ -22,12 +22,14 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 ├── rules/              # universal code-quality and process rules
 ├── hooks/              # hooks installed unconditionally
 ├── skills/             # SKILL.md bundles, symlinked per-skill into both agents
+├── codex-review/       # opt-in review bundle, installed only with --codex-review
+│   └── skills/         #   code-review (policy) + codex-cli-review (CLI transport)
 ├── templates/          # generation fragments (not symlinked into agents)
 │   ├── language/       #   reply-language directive, selected by --lang
 │   └── teams/          #   orchestration section, selected by --teams
 ├── build/              # generated, gitignored
 │   └── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
-├── tests/              # shell tests for the install libs (`bash tests/<name>.test.sh`)
+├── tests/              # `bash tests/<name>.test.sh`, `python3 tests/<name>.test.py`
 └── scripts/
     ├── build.sh        # rebuild build/AGENTS.md
     ├── install.sh      # symlink into Claude/Codex config locations
@@ -53,6 +55,13 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
   **per-skill** into `~/.claude/skills/<name>` and
   `~/.agents/skills/<name>`, so the user's own hand-rolled skills in those
   directories are left untouched. Currently empty — drop new skills here.
+- **`codex-review/`** — the review bundle, installed only with `--codex-review`
+  (into both `~/.claude/skills/` and `~/.agents/skills/`, removed without the
+  flag). `code-review` holds the review policy; `codex-cli-review` holds the
+  VCS-neutral transport — `scripts/codex_review.py` starts a fresh read-only
+  `codex exec` on a supplied scope file and returns the review as JSON against
+  `scripts/review-output.schema.json`. `codex-commit-review.sh` runs its review
+  pass through that script, so hook and skills share one review policy.
 - **`scripts/lib/install-lib.sh`** — shell library exposing the symlink,
   hook-registration, permission/env, MCP-registration, and import-inlining
   primitives. Sourced by this repo's drivers and intended to be reused by
@@ -131,7 +140,7 @@ cd ~/Projects/coding-agent-config
 | `--lang=ru\|en` | pin the agent's reply language. Omitted, the agent replies in the operator's own language; set, it always replies in Russian or English. |
 | `--sdd` | install the `agent-sdd` npm package globally, then run `sdd install <mode>`. agent-sdd installs its own rules, skill, and hooks. |
 | `--teams` | delegation-first setup for both agents: adds `rules/orchestration.md` to the generated `CLAUDE.md` / `AGENTS.md`, sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (omitted, the key is removed), and turns both Codex gates on in `~/.codex/config.toml` — `features.multi_agent` and `agents.enabled` (omitted, the config is left as-is). See [Orchestration](#orchestration). |
-| `--codex-review` | register the `codex-commit-review.sh` `PreToolUse` hook (claude/all). Omitted, the hook is removed. |
+| `--codex-review` | install the `codex-review/` skills on both surfaces and register the `codex-commit-review.sh` `PreToolUse` hook (the hook is claude/all only). Omitted, both are removed. |
 | `--update-mcps` | update npm-backed MCP packages to `latest` without asking per package. |
 
 ### Targets
@@ -146,10 +155,10 @@ Windows. "symlink" means a junction on Windows (see
 | Claude Code | `$AGENT_HOME/.claude/rules` (symlink)       | `rules/`                              |
 | Claude Code | `$AGENT_HOME/.claude/hooks` (symlink)       | `hooks/`                              |
 | Claude Code | `$AGENT_HOME/.claude/settings.json` (mutated) | hook entries idempotently upserted; `env` with `--teams` |
-| Claude Code | `$AGENT_HOME/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`          |
+| Claude Code | `$AGENT_HOME/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`, plus `codex-review/skills/<name>/` with `--codex-review` |
 | Codex CLI / IDE | `${CODEX_HOME:-$AGENT_HOME/.codex}/AGENTS.md` (symlink, copy on Windows) | `build/AGENTS.md` |
 | Codex CLI / IDE | `${CODEX_HOME:-$AGENT_HOME/.codex}/config.toml` (mutated) | `[mcp_servers.<name>]`; `features.multi_agent` + `agents.enabled` with `--teams` |
-| Codex CLI / IDE | `$AGENT_HOME/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`      |
+| Codex CLI / IDE | `$AGENT_HOME/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`, plus `codex-review/skills/<name>/` with `--codex-review` |
 
 With `--sdd`, agent-sdd writes its own targets on top of the above
 (`~/.claude/sdd/`, `@sdd` imports appended to `~/.claude/CLAUDE.md`, its skill
@@ -189,6 +198,15 @@ through the hook's `additionalContext`. It is fail-open (no `codex` on PATH,
 or a failing pass, lets the commit through untouched) and can be muted at
 runtime with `~/.claude/codex-commit-review.disabled` or
 `CODEX_COMMIT_REVIEW_DISABLED=1`.
+
+The review pass is the `codex-cli-review` skill: the hook writes the status and
+the staged plus unstaged diff into a scope file and calls
+`~/.claude/skills/codex-cli-review/scripts/codex_review.py`, which runs the
+review under the `code-review` policy and returns JSON. That is why the flag
+installs skills and hook together — without the skill the hook allows the commit
+and says the review was skipped. The fix pass carries
+`CODE_REVIEW_HOOK_ACTIVE=1`, the guard the script itself honours, so the codex
+applying the fixes cannot start a nested review.
 
 With `--sdd`, agent-sdd merges its own hooks into `~/.claude/settings.json`.
 
@@ -269,7 +287,7 @@ remove the stale global package first if you need to force a downgrade).
 
 ```bash
 ./scripts/install.sh claude [--sdd] [--teams] [--codex-review] [--lang=ru|en]
-./scripts/install.sh codex  [--sdd] [--teams] [--lang=ru|en]   # only Codex (also runs build)
+./scripts/install.sh codex  [--sdd] [--teams] [--codex-review] [--lang=ru|en]  # only Codex (also runs build)
 ./scripts/install.sh all    [--sdd] [--teams] [--codex-review] [--lang=ru|en]
 ```
 
@@ -278,7 +296,9 @@ remove the stale global package first if you need to force a downgrade).
 Drop `skills/<name>/SKILL.md` (plus any supporting files) into the repo, then
 re-run `./scripts/install.sh all`. Per-skill symlinks land in
 `~/.claude/skills/<name>` and `~/.agents/skills/<name>`. Skills are
-auto-discovered from `skills/*/` — no flag, no list to maintain.
+auto-discovered from `skills/*/` — no flag, no list to maintain. The
+`codex-review/skills/*/` bundle is the exception: it is discovered the same way
+but only when `--codex-review` is passed.
 
 User-owned skills with different names (e.g. `~/.claude/skills/my-thing/`)
 are untouched. A same-name collision is backed up to
@@ -303,6 +323,7 @@ this install should:
    `scripts/install.sh`.
 3. Call `link`, `install_hook`, `install_skills`, `install_permission_rules`,
    `install_teams_env`, `install_codex_subagents`, `install_codex_review_hook`,
+   `install_codex_review_skills`,
    `teams_section`, `ensure_mcp_npm_global`,
    `ensure_agent_sdd`, `mcp_launch_spec`, `register_mcp_claude`,
    `register_mcp_codex`, `register_core_mcp_claude`, `register_core_mcp_codex`,
@@ -323,7 +344,9 @@ header and remain backwards-compatible across patch releases.
 - `~/.claude/agents/`, `~/.claude/commands/`,
   `~/.claude/projects/*/memory/` — not managed by this repo.
 - Skills you authored yourself in `~/.claude/skills/` or `~/.agents/skills/` —
-  install.sh only touches subdirs that match a name in this repo's `skills/`.
+  install.sh only touches subdirs that match a name in this repo's `skills/` or
+  `codex-review/skills/`, and dropping the review bundle removes only symlinks
+  that point back into this repo.
 - `~/.codex/config.toml` — only `[mcp_servers.<name>]` and, with `--teams`,
   `features.multi_agent` (written by `codex features enable`) and
   `agents.enabled`. Everything else, including `[agents.<name>]` role
