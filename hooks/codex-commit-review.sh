@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# PreToolUse (Bash). Before a `git commit` / `arc commit`, run the uncommitted
-# changes through codex in two passes: (1) review, (2) apply fixes straight into
-# the files. No human confirmation is asked for: the hook always returns
-# permissionDecision:"allow" and puts the review plus the fix report into
-# additionalContext. Fail-open: when codex fails the commit goes through as is,
-# with a warning.
+# Before a `git commit` / `arc commit`, run the uncommitted changes through
+# codex in two passes: (1) review, (2) apply fixes straight into the files. No
+# human confirmation is asked for. Fail-open: when codex fails the commit goes
+# through as is, with a warning.
 #   review: python3 <codex-cli-review skill>/scripts/codex_review.py
 #             --cwd <root> --scope-file <status + diff>
 #   fixes:  <review> | codex exec -s workspace-write -C <root> "<fix-prompt>"
+#
+# Two harnesses, two envelopes, selected by COMMIT_REVIEW_PROTOCOL:
+#   claude (default) — PreToolUse (Bash). Always permissionDecision:"allow",
+#     with the review and the fix report in additionalContext.
+#   cursor — beforeShellExecution, entered through cursor-commit-review.sh.
+#     Cursor hands a hook message to the agent only on a refusal, so the review
+#     comes back as permission:"deny" and the agent re-runs the commit. The
+#     scope hash of the reviewed change is remembered, so that retry is let
+#     through instead of starting another review.
 #
 # The review pass owns no policy of its own: the skill script starts a read-only
 # codex on the supplied scope under $code-review and returns the review as JSON.
@@ -15,7 +22,7 @@
 #
 # Kill switches (any one of them makes the hook exit quietly, and the commit
 # takes its normal path):
-#   CODEX_COMMIT_REVIEW_DISABLED=1  — env of the Claude Code process (needs a
+#   CODEX_COMMIT_REVIEW_DISABLED=1  — env of the agent process (needs a
 #     session restart);
 #   the file ~/.claude/codex-commit-review.disabled — created/removed on the
 #     fly, path overridable through CODEX_COMMIT_REVIEW_FLAG;
@@ -38,12 +45,17 @@ CODEX_COMMIT_REVIEW_FLAG="${CODEX_COMMIT_REVIEW_FLAG:-$(agent_home)/.claude/code
 command -v jq >/dev/null 2>&1 || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-input=$(cat)
-tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')
-command=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
-cwd=$(printf '%s' "$input" | jq -r '.cwd // empty')
+PROTOCOL="${COMMIT_REVIEW_PROTOCOL:-claude}"
 
-[[ "$tool" != "Bash" ]] && exit 0
+input=$(cat)
+cwd=$(printf '%s' "$input" | jq -r '.cwd // empty')
+if [[ "$PROTOCOL" == "cursor" ]]; then
+  command=$(printf '%s' "$input" | jq -r '.command // empty')
+else
+  tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')
+  command=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
+  [[ "$tool" != "Bash" ]] && exit 0
+fi
 
 is_commit() {
   local vcs="$1"
@@ -67,6 +79,10 @@ fi
 
 # $1 — short reason for the UI, $2 — full context for the agent (defaults to $1).
 allow() {
+  if [[ "$PROTOCOL" == "cursor" ]]; then
+    jq -n --arg r "$1" '{permission: "allow", user_message: $r}'
+    exit 0
+  fi
   jq -n --arg r "$1" --arg c "${2:-$1}" '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -78,16 +94,33 @@ allow() {
   exit 0
 }
 
+# Cursor only: the review reaches the agent as the reason the commit was
+# refused. The fixes are already on disk; the agent re-runs the commit.
+deny() {
+  jq -n --arg r "$1" --arg c "$2" '{permission: "deny", user_message: $r, agent_message: $c}'
+  exit 0
+}
+
+text_hash() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 1 | cut -d' ' -f1
+  elif command -v sha1sum >/dev/null 2>&1; then
+    sha1sum | cut -d' ' -f1
+  else
+    cksum | cut -d' ' -f1
+  fi
+}
+
 file_hash() {
   local f="$1"
   [[ -f "$f" ]] || { printf 'absent'; return; }
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 1 -- "$f" | cut -d' ' -f1
-  elif command -v sha1sum >/dev/null 2>&1; then
-    sha1sum -- "$f" | cut -d' ' -f1
-  else
-    cksum -- "$f" | cut -d' ' -f1
-  fi
+  text_hash < "$f"
+}
+
+# Where the hash of an already reported review is kept, per working copy.
+state_path() {
+  printf '%s/.cache/coding-agent-config/commit-review/%s' \
+    "$(agent_home)" "$(printf '%s' "$1" | text_hash)"
 }
 
 # Effective commit directory: the session cwd plus any `cd …` applied in the
@@ -181,26 +214,50 @@ else
     "arc commit, but no arc working copy was found from $target_dir. No review and no auto-fixes ran, the commit goes through as is."
 fi
 
-vcs_status=$( (cd "$vcs_root" && "$vcs" status --short 2>/dev/null) )
-[[ -z "$vcs_status" ]] && exit 0
+# Nothing uncommitted — no review to run, and no commit to hold up.
+[[ -n "$( (cd "$vcs_root" && "$vcs" status --short 2>/dev/null) )" ]] || exit 0
 
-REVIEW_SCRIPT="$(agent_home)/.claude/skills/codex-cli-review/scripts/codex_review.py"
-[[ -f "$REVIEW_SCRIPT" ]] || allow "codex-cli-review skill is not installed; review skipped." \
-  "The codex-cli-review skill is missing at $REVIEW_SCRIPT, so no review and no auto-fixes ran before the $vcs commit. Re-run install.sh with --codex-review. The commit goes through as is."
+# The skill lands in a different root per harness, and the hook may be running
+# under a harness that is not the one that installed it.
+review_script() {
+  local root candidate
+  for root in "$(agent_home)/.claude/skills" "$(agent_home)/.agents/skills" "$(agent_home)/.cursor/skills"; do
+    candidate="$root/codex-cli-review/scripts/codex_review.py"
+    [[ -f "$candidate" ]] && { printf '%s' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+REVIEW_SCRIPT="$(review_script)" || allow "codex-cli-review skill is not installed; review skipped." \
+  "The codex-cli-review skill was not found under ~/.claude/skills, ~/.agents/skills or ~/.cursor/skills, so no review and no auto-fixes ran before the $vcs commit. Re-run install.sh with --codex-review. The commit goes through as is."
+
+# Scope handed to the reviewer, rebuilt after the fix pass to hash what the
+# agent is about to commit.
+build_scope() {
+  local out="$1"
+  {
+    printf 'Review the current uncommitted %s working-copy changes.\nRepository root: %s\n\n' "$vcs" "$vcs_root"
+    printf '<%s_status>\n%s\n</%s_status>\n\n' "$vcs" "$( (cd "$vcs_root" && "$vcs" status --short 2>/dev/null) )" "$vcs"
+    printf '<%s_diff>\n' "$vcs"
+    # Review what actually goes into the commit: the staged diff (`commit` commits
+    # the index). The unstaged half covers the `commit -a` workflow without a
+    # preceding `add`. Otherwise the unstaged diff is empty after `add` and codex
+    # has nothing to review.
+    (cd "$vcs_root" && { "$vcs" diff --cached 2>/dev/null; "$vcs" diff 2>/dev/null; })
+    printf '</%s_diff>\n\n' "$vcs"
+    printf 'Inspect the exact untracked files listed by status. Read unchanged files only when needed to verify a finding. Do not scan unrelated directories.\n'
+  } >"$out"
+}
 
 scope_file=$(mktmp)
-{
-  printf 'Review the current uncommitted %s working-copy changes.\nRepository root: %s\n\n' "$vcs" "$vcs_root"
-  printf '<%s_status>\n%s\n</%s_status>\n\n' "$vcs" "$vcs_status" "$vcs"
-  printf '<%s_diff>\n' "$vcs"
-  # Review what actually goes into the commit: the staged diff (`commit` commits
-  # the index). The unstaged half covers the `commit -a` workflow without a
-  # preceding `add`. Otherwise the unstaged diff is empty after `add` and codex
-  # has nothing to review.
-  (cd "$vcs_root" && { "$vcs" diff --cached 2>/dev/null; "$vcs" diff 2>/dev/null; })
-  printf '</%s_diff>\n\n' "$vcs"
-  printf 'Inspect the exact untracked files listed by status. Read unchanged files only when needed to verify a finding. Do not scan unrelated directories.\n'
-} >"$scope_file"
+build_scope "$scope_file"
+
+STATE_FILE="$(state_path "$vcs_root")"
+if [[ "$PROTOCOL" == "cursor" && -f "$STATE_FILE" ]] \
+   && [[ "$(cat "$STATE_FILE")" == "$(file_hash "$scope_file")" ]]; then
+  rm -f "$STATE_FILE"
+  allow "Codex: this change was already reviewed; the commit goes through."
+fi
 
 run_with_timeout "" "$out" "$err" \
   python3 "$REVIEW_SCRIPT" --cwd "$vcs_root" --scope-file "$scope_file"
@@ -255,8 +312,8 @@ done
 restaged_text="(nothing)"
 [[ "${#restaged[@]}" -gt 0 ]] && restaged_text=$(printf '%s\n' "${restaged[@]}")
 
-allow "Codex: review done, fixes applied automatically (files re-staged: ${#restaged[@]})." \
-  "Codex review and auto-fixes before the commit ($vcs, $vcs_root):
+reason="Codex: review done, fixes applied automatically (files re-staged: ${#restaged[@]})."
+context="Codex review and auto-fixes before the commit ($vcs, $vcs_root):
 
 === REVIEW (JSON) ===
 $review
@@ -271,3 +328,14 @@ $restaged_text
 $( (cd "$vcs_root" && "$vcs" status --short 2>/dev/null) )
 
 Files on disk may have changed: re-read the affected files before editing them further."
+
+if [[ "$PROTOCOL" == "cursor" ]]; then
+  build_scope "$scope_file"
+  mkdir -p "$(dirname "$STATE_FILE")"
+  file_hash "$scope_file" > "$STATE_FILE"
+  deny "$reason" "$context
+
+The commit was stopped so this report could reach you. Re-run the same commit command to let it through."
+fi
+
+allow "$reason" "$context"

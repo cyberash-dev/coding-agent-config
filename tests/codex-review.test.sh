@@ -27,13 +27,14 @@ assert_contains() {
   printf '%s' "$haystack" | grep -F -- "$needle" >/dev/null
 }
 
-test_review_skills_are_linked_when_requested() {
+test_review_skills_are_copied_when_requested() {
   sandbox
 
   install_codex_review_skills 1 "$SKILLS_SOURCE" "$TMP_ROOT/skills" >/dev/null
 
-  [[ "$(readlink "$TMP_ROOT/skills/code-review")" == "$SKILLS_SOURCE/code-review" ]] || return 1
-  [[ "$(readlink "$TMP_ROOT/skills/codex-cli-review")" == "$SKILLS_SOURCE/codex-cli-review" ]]
+  cmp -s "$SKILLS_SOURCE/code-review/SKILL.md" "$TMP_ROOT/skills/code-review/SKILL.md" || return 1
+  cmp -s "$SKILLS_SOURCE/codex-cli-review/scripts/codex_review.py" \
+    "$TMP_ROOT/skills/codex-cli-review/scripts/codex_review.py"
 }
 
 test_review_skills_are_removed_when_not_requested() {
@@ -83,6 +84,12 @@ run_hook() {
     | HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:$PATH" bash "$ROOT/hooks/codex-commit-review.sh"
 }
 
+run_cursor_hook() {
+  local command="${1:-git commit -m wip}"
+  printf '{"command":"%s","cwd":"%s","hook_event_name":"beforeShellExecution"}' "$command" "$TMP_ROOT/repo" \
+    | HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:$PATH" bash "$ROOT/hooks/cursor-commit-review.sh"
+}
+
 test_commit_review_reviews_the_staged_diff_through_the_skill_script() {
   hook_sandbox
 
@@ -123,6 +130,72 @@ test_review_skills_keep_a_same_name_skill_owned_by_the_user() {
   assert_contains "$(cat "$TMP_ROOT/skills/code-review/SKILL.md")" "hand-rolled"
 }
 
+test_commit_review_finds_the_skill_installed_for_the_other_harnesses() {
+  hook_sandbox
+  mkdir -p "$TMP_ROOT/home/.agents/skills/codex-cli-review/scripts"
+  mv "$TMP_ROOT/home/$HOOK_SKILL_SCRIPT_DIR/codex_review.py" \
+    "$TMP_ROOT/home/.agents/skills/codex-cli-review/scripts/codex_review.py"
+
+  local output
+  output="$(run_hook)" || return 1
+
+  assert_contains "$output" "STUB REVIEW"
+}
+
+test_cursor_commit_review_denies_the_commit_and_reports_the_review() {
+  hook_sandbox
+
+  local output
+  output="$(run_cursor_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.permission')" == "deny" ]] \
+    && assert_contains "$(printf '%s' "$output" | jq -r '.agent_message')" "STUB REVIEW"
+}
+
+test_cursor_commit_review_lets_the_retry_through() {
+  hook_sandbox
+  run_cursor_hook >/dev/null || return 1
+
+  local output
+  output="$(run_cursor_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.permission')" == "allow" ]]
+}
+
+test_cursor_commit_review_reviews_again_after_the_change_moves_on() {
+  hook_sandbox
+  run_cursor_hook >/dev/null || return 1
+  printf 'def refund():\n    return None\n' >> "$TMP_ROOT/repo/service.py"
+  git -C "$TMP_ROOT/repo" add service.py
+
+  local output
+  output="$(run_cursor_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.permission')" == "deny" ]]
+}
+
+test_cursor_commit_review_ignores_a_command_that_is_not_a_commit() {
+  hook_sandbox
+
+  local output
+  output="$(run_cursor_hook "git status")" || return 1
+
+  [[ -z "$output" ]] \
+    && [[ ! -e "$TMP_ROOT/codex-call" ]]
+}
+
+test_cursor_commit_review_allows_the_commit_when_the_review_script_is_absent() {
+  hook_sandbox
+  rm "$TMP_ROOT/home/$HOOK_SKILL_SCRIPT_DIR/codex_review.py"
+
+  local output
+  output="$(run_cursor_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.permission')" == "allow" ]] \
+    && assert_contains "$(printf '%s' "$output" | jq -r '.user_message')" "review skipped" \
+    && [[ ! -e "$TMP_ROOT/codex-call" ]]
+}
+
 run_test() {
   local name="$1"
   if "$name"; then
@@ -133,9 +206,15 @@ run_test() {
   fi
 }
 
-run_test test_review_skills_are_linked_when_requested
+run_test test_review_skills_are_copied_when_requested
 run_test test_review_skills_are_removed_when_not_requested
 run_test test_review_skills_keep_a_same_name_skill_owned_by_the_user
 run_test test_commit_review_reviews_the_staged_diff_through_the_skill_script
 run_test test_commit_review_keeps_the_fix_pass_from_starting_a_nested_review
 run_test test_commit_review_allows_the_commit_when_the_review_script_is_absent
+run_test test_commit_review_finds_the_skill_installed_for_the_other_harnesses
+run_test test_cursor_commit_review_denies_the_commit_and_reports_the_review
+run_test test_cursor_commit_review_lets_the_retry_through
+run_test test_cursor_commit_review_reviews_again_after_the_change_moves_on
+run_test test_cursor_commit_review_ignores_a_command_that_is_not_a_commit
+run_test test_cursor_commit_review_allows_the_commit_when_the_review_script_is_absent
