@@ -1,12 +1,12 @@
 # coding-agent-config
 
-Portable coding-agent setup for Claude Code and Codex CLI / IDE on macOS,
-Linux, and Windows.
+Portable coding-agent setup for Claude Code, Codex CLI / IDE and Cursor on
+macOS, Linux, and Windows.
 
-Single source of truth for universal coding rules and hooks. One script
-symlinks them into the per-user config locations of each agent and registers
-hooks in `~/.claude/settings.json`. The optional `--sdd` flag delegates
-Spec-Driven Development setup to the
+Single source of truth for universal coding rules and hooks. One script copies
+them into the per-user config locations of each agent and registers hooks in
+`~/.claude/settings.json` and `~/.cursor/hooks.json`. The optional `--sdd` flag
+delegates Spec-Driven Development setup to the
 [`agent-sdd`](https://www.npmjs.com/package/agent-sdd) npm package.
 
 This repo is intentionally project-, vendor-, and VCS-agnostic. Project- or
@@ -21,18 +21,20 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 ├── CLAUDE.md           # entry point for Claude Code (uses @rules/* imports)
 ├── rules/              # universal code-quality and process rules
 ├── hooks/              # hooks installed unconditionally
-├── skills/             # SKILL.md bundles, symlinked per-skill into both agents
+├── skills/             # SKILL.md bundles, copied per-skill into every agent
 ├── codex-review/       # opt-in review bundle, installed only with --codex-review
 │   └── skills/         #   code-review (policy) + codex-cli-review (CLI transport)
-├── templates/          # generation fragments (not symlinked into agents)
+├── templates/          # generation fragments (never copied into agents as-is)
 │   ├── language/       #   reply-language directive, selected by --lang
 │   └── teams/          #   orchestration section, selected by --teams
 ├── build/              # generated, gitignored
-│   └── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
+│   ├── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
+│   └── cursor/rules/   #   one .mdc per rule for Cursor (frontmatter + body)
 ├── tests/              # `bash tests/<name>.test.sh`, `python3 tests/<name>.test.py`
 └── scripts/
     ├── build.sh        # rebuild build/AGENTS.md
-    ├── install.sh      # symlink into Claude/Codex config locations
+    ├── build-cursor.sh # rebuild build/cursor/rules/*.mdc
+    ├── install.sh      # copy into Claude/Codex/Cursor config locations
     └── lib/
         ├── install-lib.sh      # reusable shell helpers (public extension surface)
         ├── platform.sh         # OS detection and path translation (sourced by install-lib)
@@ -49,12 +51,14 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
   install.sh installs it globally (`npm install -g agent-sdd`), then runs
   `sdd install <mode>` so agent-sdd installs its own rules, skill, and hooks.
 - **`hooks/`** — hook scripts. `code-navigation-reminder.sh` is registered
-  unconditionally; `codex-commit-review.sh` only with `--codex-review`.
-- **`skills/`** — SKILL.md bundles (open standard, supported by both Claude Code
-  and Codex CLI / IDE). Each subdir is one skill and gets symlinked
-  **per-skill** into `~/.claude/skills/<name>` and
-  `~/.agents/skills/<name>`, so the user's own hand-rolled skills in those
-  directories are left untouched. Currently empty — drop new skills here.
+  unconditionally; `codex-commit-review.sh` (Claude Code) and its Cursor entry
+  point `cursor-commit-review.sh` only with `--codex-review`.
+- **`skills/`** — SKILL.md bundles (open standard, supported by Claude Code,
+  Codex CLI / IDE and Cursor alike). Each subdir is one skill and gets copied
+  **per-skill** into `~/.claude/skills/<name>` and `~/.agents/skills/<name>`,
+  so the user's own hand-rolled skills in those directories are left untouched.
+  Cursor reads `~/.agents/skills` too, which is why the cursor mode installs
+  there instead of into a fourth copy. Currently empty — drop new skills here.
 - **`codex-review/`** — the review bundle, installed only with `--codex-review`
   (into both `~/.claude/skills/` and `~/.agents/skills/`, removed without the
   flag). `code-review` holds the review policy; `codex-cli-review` holds the
@@ -62,29 +66,42 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
   `codex exec` on a supplied scope file and returns the review as JSON against
   `scripts/review-output.schema.json`. `codex-commit-review.sh` runs its review
   pass through that script, so hook and skills share one review policy.
-- **`scripts/lib/install-lib.sh`** — shell library exposing the symlink,
-  hook-registration, permission/env, MCP-registration, and import-inlining
-  primitives. Sourced by this repo's drivers and intended to be reused by
-  downstream extension repos. It sources `platform.sh` and
+- **`scripts/lib/install-lib.sh`** — shell library exposing the copy,
+  hook-registration, permission/env, MCP-registration, rule-generation and
+  import-inlining primitives. Sourced by this repo's drivers and intended to be
+  reused by downstream extension repos. It sources `platform.sh` and
   `npm-mcp-updates.sh`, so `agent_home`, `native_path` and
   `ensure_mcp_npm_global` come with it.
 - **`scripts/lib/platform.sh`** — OS detection (`os_kind`, `is_windows`), the
   install root (`agent_home` / `$AGENT_HOME`), path translation
-  (`native_path`, `windows_path`, `posix_path`) and the NTFS junction
-  primitives. Everything here is the identity on macOS and Linux.
+  (`native_path`, `windows_path`, `posix_path`) and the two NTFS junction
+  primitives left for migration — an install from an older version of this repo
+  linked directories instead of copying them. Everything here is the identity
+  on macOS and Linux.
 
 `CLAUDE.md` is intentionally tiny — a table of contents that Claude Code
 expands at session start via `@rules/X.md` imports. Codex does not
-understand `@import`, so `scripts/build.sh` produces a flattened
-`build/AGENTS.md` with all referenced files inlined.
+understand `@import` (it merges one instruction file per directory and nothing
+else), so `scripts/build.sh` produces a flattened `build/AGENTS.md` with all
+referenced files inlined. Cursor ignores plain `.md` in a rules directory, so
+`scripts/build-cursor.sh` republishes each rule as `<name>.mdc` with
+`alwaysApply: true` frontmatter and the description taken from the same
+`CLAUDE.md` index line.
 
 ## Platform support
 
-| Platform | How install.sh runs | Link model |
+| Platform | How install.sh runs | Install model |
 |---|---|---|
-| macOS | any shell | symlinks |
-| Linux (incl. WSL) | any shell | symlinks |
-| Windows, native | **from Git Bash** | junctions for directories, copy for files |
+| macOS | any shell | copies |
+| Linux (incl. WSL) | any shell | copies |
+| Windows, native | **from Git Bash** | copies |
+
+Rules, hooks and skills are **copied**, not linked, on every platform: editing
+this repo takes effect on the next `install.sh` run, not on the next agent
+session. What the installer wrote is recorded in a `.coding-agent-config`
+manifest next to the copies, so a later run removes its own stale files (a rule
+dropped from the index, a bundle switched off) and leaves everything else in
+that directory alone.
 
 Required on every platform: `bash`, `jq`, `awk`. `node` + `npm` are optional —
 without them the MCP registration is skipped with a warning and everything else
@@ -101,16 +118,14 @@ the `hooks/*.sh` scripts. Without it Claude Code falls back to PowerShell,
 where a `.sh` hook cannot run — hooks are therefore registered with
 `"shell": "bash"` on Windows so that failure is explicit.
 
-Two behaviours differ from macOS/Linux:
+Nothing about the install model differs from macOS/Linux any more — every
+target is a copy. An install from an older version of this repo left NTFS
+junctions behind; those are unlinked (never `mv`-ed, which would drag the repo
+contents out) the first time the copy lands on top of them.
 
-- **Directories are NTFS junctions, not symlinks.** `ln -s` under Git Bash
-  copies unless Developer Mode is on, so `rules/`, `hooks/` and each skill are
-  linked with `mklink /J`, which needs no elevation. The repo stays the live
-  source: editing `rules/*.md` takes effect on the next Claude Code session,
-  exactly as on macOS.
-- **`AGENTS.md` is a copy.** A single file has no junction equivalent, so
-  `${CODEX_HOME:-%USERPROFILE%\.codex}\AGENTS.md` is copied. After editing any
-  `*.md`, re-run `./scripts/install.sh codex` to refresh it.
+Cursor is the one place where a hook is registered without a shell selector of
+its own, so a `.sh` hook there needs `bash` on `PATH`; the installer says so
+when it registers it.
 
 Install targets are anchored at `%USERPROFILE%`, not `$HOME`: Git Bash derives
 `$HOME` from `HOMEDRIVE`/`HOMEPATH`, which corporate profiles point at a
@@ -127,9 +142,10 @@ Windows-side installation, and vice versa. Pick one and install there.
 ```bash
 git clone <this-repo> ~/Projects/coding-agent-config
 cd ~/Projects/coding-agent-config
-./scripts/install.sh all                # universal rules + hooks
+./scripts/install.sh all                # universal rules + hooks, all three agents
 ./scripts/install.sh all --sdd          # + Spec-Driven Development via agent-sdd
 ./scripts/install.sh all --lang=en      # pin replies to English (or ru)
+./scripts/install.sh cursor             # Cursor only
 ```
 
 ### Flags
@@ -139,37 +155,47 @@ cd ~/Projects/coding-agent-config
 | *(none)* | universal rules + `hooks/`. Agent uses built-in git knowledge. |
 | `--lang=ru\|en` | pin the agent's reply language. Omitted, the agent replies in the operator's own language; set, it always replies in Russian or English. |
 | `--sdd` | install the `agent-sdd` npm package globally, then run `sdd install <mode>`. agent-sdd installs its own rules, skill, and hooks. |
-| `--teams` | delegation-first setup for both agents: adds `rules/orchestration.md` to the generated `CLAUDE.md` / `AGENTS.md`, sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (omitted, the key is removed), and turns both Codex gates on in `~/.codex/config.toml` — `features.multi_agent` and `agents.enabled` (omitted, the config is left as-is). See [Orchestration](#orchestration). |
-| `--codex-review` | install the `codex-review/` skills on both surfaces and register the `codex-commit-review.sh` `PreToolUse` hook (the hook is claude/all only). Omitted, both are removed. |
+| `--teams` | delegation-first setup: adds `rules/orchestration.md` to the generated `CLAUDE.md` / `AGENTS.md` and to the Cursor rule set, sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (omitted, the key is removed), and turns both Codex gates on in `~/.codex/config.toml` — `features.multi_agent` and `agents.enabled` (omitted, the config is left as-is). Cursor has no runtime gate to flip, so there it is the rule alone. See [Orchestration](#orchestration). |
+| `--codex-review` | install the `codex-review/` skills on every surface and register the commit-review hook for Claude Code (`PreToolUse`) and Cursor (`beforeShellExecution`); Codex has no hook configuration to put it in. Omitted, both are removed. |
 | `--update-mcps` | update npm-backed MCP packages to `latest` without asking per package. |
 
 ### Targets
 
 `$AGENT_HOME` below is `$HOME` on macOS and Linux, and `%USERPROFILE%` on
-Windows. "symlink" means a junction on Windows (see
-[Platform support](#platform-support)).
+Windows.
 
 | Agent       | Target path                                 | Source                                |
 |-------------|---------------------------------------------|---------------------------------------|
 | Claude Code | `$AGENT_HOME/.claude/CLAUDE.md` (generated file) | `CLAUDE.md`                      |
-| Claude Code | `$AGENT_HOME/.claude/rules` (symlink)       | `rules/`                              |
-| Claude Code | `$AGENT_HOME/.claude/hooks` (symlink)       | `hooks/`                              |
+| Claude Code | `$AGENT_HOME/.claude/rules` (copied)        | `rules/`                              |
+| Claude Code | `$AGENT_HOME/.claude/hooks` (copied)        | `hooks/`                              |
 | Claude Code | `$AGENT_HOME/.claude/settings.json` (mutated) | hook entries idempotently upserted; `env` with `--teams` |
-| Claude Code | `$AGENT_HOME/.claude/skills/<name>` (symlink per skill) | `skills/<name>/`, plus `codex-review/skills/<name>/` with `--codex-review` |
-| Codex CLI / IDE | `${CODEX_HOME:-$AGENT_HOME/.codex}/AGENTS.md` (symlink, copy on Windows) | `build/AGENTS.md` |
+| Claude Code | `$AGENT_HOME/.claude/skills/<name>` (copied per skill) | `skills/<name>/`, plus `codex-review/skills/<name>/` with `--codex-review` |
+| Codex CLI / IDE | `${CODEX_HOME:-$AGENT_HOME/.codex}/AGENTS.md` (copied) | `build/AGENTS.md` |
 | Codex CLI / IDE | `${CODEX_HOME:-$AGENT_HOME/.codex}/config.toml` (mutated) | `[mcp_servers.<name>]`; `features.multi_agent` + `agents.enabled` with `--teams` |
-| Codex CLI / IDE | `$AGENT_HOME/.agents/skills/<name>` (symlink per skill) | `skills/<name>/`, plus `codex-review/skills/<name>/` with `--codex-review` |
+| Codex CLI / IDE | `$AGENT_HOME/.agents/skills/<name>` (copied per skill) | `skills/<name>/`, plus `codex-review/skills/<name>/` with `--codex-review` |
+| Cursor | `$AGENT_HOME/.cursor/rules/<name>.mdc` (generated, one per rule) | `build/cursor/rules/`, built from `CLAUDE.md` + `rules/` |
+| Cursor | `$AGENT_HOME/.cursor/hooks` (copied)        | `hooks/`                              |
+| Cursor | `$AGENT_HOME/.cursor/hooks.json` (mutated)  | `beforeShellExecution` entry with `--codex-review` |
+| Cursor | `$AGENT_HOME/.cursor/mcp.json` (mutated)    | `mcpServers.<name>`                   |
+| Cursor | `$AGENT_HOME/.agents/skills/<name>` (copied per skill) | shared with the Codex target above |
+
+Codex reads `AGENTS.override.md` in preference to `AGENTS.md` at every level.
+If one exists in the Codex home the install would look successful while nothing
+loaded, so `install.sh codex` warns about it.
 
 With `--sdd`, agent-sdd writes its own targets on top of the above
 (`~/.claude/sdd/`, `@sdd` imports appended to `~/.claude/CLAUDE.md`, its skill
 and hooks); see the [`agent-sdd`](https://www.npmjs.com/package/agent-sdd) docs.
 
-If anything already exists at a target path it is renamed to
-`<target>.bak.<unix-timestamp>` before the symlink/file is created.
+A file at a target path that this repo does not own is renamed to
+`<target>.bak.<unix-timestamp>` before the copy lands. Files the installer
+wrote earlier are simply overwritten — its own manifest says they are its own.
 
-`~/.claude/CLAUDE.md` and `~/.claude/settings.json` are **regenerated on
-every run** (so flag changes take effect). All other targets are
-symlinks — re-running with the same flags is a no-op (`= already linked`).
+Re-running with the same flags writes nothing at all: identical copies are
+skipped, and the config files (`settings.json`, `.claude.json`, `config.toml`,
+`hooks.json`, `mcp.json`) are only rewritten when the result actually differs,
+so a repeat install leaves no new `.bak` behind.
 
 If an older install created repo-owned skill symlinks under
 `~/.codex/skills/<name>`, `install.sh codex` removes those legacy symlinks
@@ -180,28 +206,65 @@ legacy directory is removed too.
 
 ### Hooks
 
-Registered in `~/.claude/settings.json` idempotently — entries are matched
-by script basename, stale paths are removed, the canonical path is
-upserted. The script will not delete unrelated hook entries (e.g.
-the `UserPromptSubmit` `PROJECT_MAP` reminder).
+Registered in `~/.claude/settings.json` and `~/.cursor/hooks.json`
+idempotently — the entry is replaced where it already sits, so a repeat install
+rewrites nothing. Before adding a hook the installer checks what is already
+there:
 
-| Hook | Event | Matcher | Installed when |
-|---|---|---|---|
-| `code-navigation-reminder.sh` | `PreToolUse` | `Grep\|Read` | always |
-| `codex-commit-review.sh` | `PreToolUse` | `Bash` | `--codex-review` |
+- **An entry it owns** — the same script, or a same-name script from the
+  directory this install writes to — is taken out of *every* event first, so a
+  hook that moved to another event does not stay registered on the old one.
+- **A same-name hook pointing at a path you own** (say
+  `/my/tools/code-navigation-reminder.sh`) is left untouched and reported:
+  `! /my/tools/... also registers ...; left as is`. Two different scripts may
+  legitimately share a file name.
+- **Repeats of one command inside the target event**, whoever wrote them (e.g.
+  a hook registered twice under `Edit|Write|MultiEdit` and `Edit|Write`),
+  collapse to the last registration — the current one, so the tool that wrote
+  it finds its own entry next time instead of adding a third.
+
+Unrelated hooks are never touched — other events, other scripts, and the
+`UserPromptSubmit` `PROJECT_MAP` reminder stay as they are.
+
+The same collapse runs once more at the very end of the install, across every
+event: with `--sdd`, agent-sdd merges its own hooks *after* this script and
+re-adds an entry for a script it already registered under a wider matcher.
+
+| Hook | Harness | Event | Matcher | Installed when |
+|---|---|---|---|---|
+| `code-navigation-reminder.sh` | Claude Code | `PreToolUse` | `Grep\|Read` | always |
+| `codex-commit-review.sh` | Claude Code | `PreToolUse` | `Bash` | `--codex-review` |
+| `cursor-commit-review.sh` | Cursor | `beforeShellExecution` | — | `--codex-review` |
+
+Cursor has no equivalent of the navigation reminder: a hook there can hand the
+agent a message only when it *refuses* the action, and `beforeReadFile` cannot
+inject context at all. The same guidance reaches Cursor as the always-applied
+`code-navigation.mdc` rule instead.
 
 `codex-commit-review.sh` is opt-in on purpose: before every `git commit` /
 `arc commit` it runs `codex` twice — a read-only review pass, then a
 `workspace-write` pass that edits the working copy and re-stages the files that
-were already staged. It never asks for confirmation, it reports what it did
-through the hook's `additionalContext`. It is fail-open (no `codex` on PATH,
-or a failing pass, lets the commit through untouched) and can be muted at
-runtime with `~/.claude/codex-commit-review.disabled` or
+were already staged. It never asks for confirmation. It is fail-open (no
+`codex` on PATH, or a failing pass, lets the commit through untouched) and can
+be muted at runtime with `~/.claude/codex-commit-review.disabled` or
 `CODEX_COMMIT_REVIEW_DISABLED=1`.
+
+One script, two hook protocols, selected by `COMMIT_REVIEW_PROTOCOL`:
+
+- **Claude Code** — the commit is allowed and the review plus the fix report
+  ride along in `additionalContext`.
+- **Cursor** — entered through `cursor-commit-review.sh`, which sets the
+  variable. Cursor delivers a hook message to the agent only on a refusal, so
+  the review comes back as `permission: "deny"` and the agent re-runs the
+  commit. The hash of the reviewed change is remembered under
+  `~/.cache/coding-agent-config/commit-review/`, so that retry is let straight
+  through instead of starting another review; a change that moved on since is
+  reviewed again.
 
 The review pass is the `codex-cli-review` skill: the hook writes the status and
 the staged plus unstaged diff into a scope file and calls
-`~/.claude/skills/codex-cli-review/scripts/codex_review.py`, which runs the
+`codex-cli-review/scripts/codex_review.py` from the first skill root that has
+it (`~/.claude/skills`, `~/.agents/skills`, `~/.cursor/skills`), which runs the
 review under the `code-review` policy and returns JSON. That is why the flag
 installs skills and hook together — without the skill the hook allows the commit
 and says the review was skipped. The fix pass carries
@@ -213,9 +276,10 @@ With `--sdd`, agent-sdd merges its own hooks into `~/.claude/settings.json`.
 ### MCP servers
 
 The install also registers MCP servers referenced by the rules into
-`~/.claude.json` (`mcpServers.<name>`) and `~/.codex/config.toml`
-(`[mcp_servers.<name>]`). Both files are backed up to `<path>.bak.<TS>`
-on first mutation per run.
+`~/.claude.json` (`mcpServers.<name>`), `~/.codex/config.toml`
+(`[mcp_servers.<name>]`) and `~/.cursor/mcp.json` (`mcpServers.<name>`, with no
+`type` key — Cursor infers stdio from `command`). Each file is backed up to
+`<path>.bak.<TS>` the first time a run actually changes it.
 
 | MCP | npm package | Installed when | Env vars |
 |---|---|---|---|
@@ -223,8 +287,8 @@ on first mutation per run.
 
 The script runs `npm install -g <pkg>` once per package (idempotent — skips
 if the bin is already on PATH). Other MCP entries you have in
-`~/.claude.json` / `~/.codex/config.toml` are left untouched; only the names
-listed above are upserted.
+`~/.claude.json`, `~/.codex/config.toml` or `~/.cursor/mcp.json` are left
+untouched; only the names listed above are upserted.
 
 On macOS and Linux the registered `command` is the absolute path to the
 installed bin. On Windows npm installs a `.cmd` shim, which the agent cannot
@@ -245,6 +309,7 @@ authorization that makes the agent actually use it.
 |---|---|---|
 | Claude Code | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — a sub-agent that Claude names becomes a teammate: own session, own context, direct messaging, shared task list | `rules/orchestration.md`, imported from the generated `~/.claude/CLAUDE.md` |
 | Codex | `features.multi_agent` and `agents.enabled` — two independent gates, either one off keeps `spawn_agent` away from the model. Both ship on, so this only undoes a deliberate opt-out | the same rule, inlined into `~/.codex/AGENTS.md` |
+| Cursor | nothing to flip — sub-agents need no config gate | the same rule, published as `~/.cursor/rules/orchestration.mdc` |
 
 The authorization half is not decoration. Codex ships this in the description
 of its `spawn_agent` tool:
@@ -264,20 +329,15 @@ and teammates cannot spawn teammates of their own.
 
 ## Editing rules
 
-Edit files under `rules/` or `hooks/` directly. Claude Code picks up
-`*.md` changes on the next session — no rebuild needed (the symlinks, and the
-junctions on Windows, resolve to live files in this repo).
-
-For Codex, regenerate the flat file after any `*.md` edit:
+Edit files under `rules/` or `hooks/` directly, then re-run the install — every
+target is a copy, so nothing reaches an agent until it is copied again:
 
 ```bash
-./scripts/install.sh codex     # also re-runs the build
-# or, equivalently:
-./scripts/build.sh
+./scripts/install.sh all       # rebuilds AGENTS.md and the .mdc set, then copies
 ```
 
-On Windows `./scripts/build.sh` alone is not enough: `AGENTS.md` is a copy, not
-a link, so use `./scripts/install.sh codex` to rebuild **and** re-copy it.
+`./scripts/build.sh` and `./scripts/build-cursor.sh` only refresh the generated
+files under `build/`; the install step is what puts them in place.
 
 SDD docs ship inside the `agent-sdd` npm package. To pick up a new release,
 re-run `./scripts/install.sh <mode> --sdd` (it installs `agent-sdd` globally;
@@ -288,14 +348,19 @@ remove the stale global package first if you need to force a downgrade).
 ```bash
 ./scripts/install.sh claude [--sdd] [--teams] [--codex-review] [--lang=ru|en]
 ./scripts/install.sh codex  [--sdd] [--teams] [--codex-review] [--lang=ru|en]  # only Codex (also runs build)
+./scripts/install.sh cursor [--teams] [--codex-review] [--lang=ru|en]          # only Cursor (also runs build-cursor)
 ./scripts/install.sh all    [--sdd] [--teams] [--codex-review] [--lang=ru|en]
 ```
+
+`--sdd` has no cursor target: `agent-sdd` installs for claude and codex only,
+and the cursor mode says so instead of failing.
 
 ## Adding a new skill
 
 Drop `skills/<name>/SKILL.md` (plus any supporting files) into the repo, then
-re-run `./scripts/install.sh all`. Per-skill symlinks land in
-`~/.claude/skills/<name>` and `~/.agents/skills/<name>`. Skills are
+re-run `./scripts/install.sh all`. Per-skill copies land in
+`~/.claude/skills/<name>` and `~/.agents/skills/<name>` (which Cursor reads as
+well). Skills are
 auto-discovered from `skills/*/` — no flag, no list to maintain. The
 `codex-review/skills/*/` bundle is the exception: it is discovered the same way
 but only when `--codex-review` is passed.
@@ -307,10 +372,17 @@ are untouched. A same-name collision is backed up to
 ## Adding a new hook
 
 Drop `hooks/<name>.sh`, then add an `install_hook` call in `install_claude`
-in `scripts/install.sh`.
+in `scripts/install.sh`, or an `install_cursor_hook` call in `install_cursor`.
 
-Hook registration is idempotent — re-running install will replace any
-prior entry that points at a script with the same basename.
+The two harnesses do not share a hook protocol: Claude Code passes
+`tool_name` / `tool_input` and reads `hookSpecificOutput`, Cursor passes the
+event's own fields and reads `permission` / `agent_message`, and its event
+names are different too. A hook meant for both handles both envelopes, the way
+`codex-commit-review.sh` does.
+
+Hook registration is idempotent — re-running install replaces the entry this
+repo owns (see [Hooks](#hooks) for what counts as owned) and leaves a same-name
+hook of your own alone.
 
 ## Downstream extensions
 
@@ -321,13 +393,16 @@ this install should:
 1. Embed this repo as a git submodule.
 2. `source <submodule>/scripts/lib/install-lib.sh` from its own
    `scripts/install.sh`.
-3. Call `link`, `install_hook`, `install_skills`, `install_permission_rules`,
-   `install_teams_env`, `install_codex_subagents`, `install_codex_review_hook`,
-   `install_codex_review_skills`,
-   `teams_section`, `ensure_mcp_npm_global`,
-   `ensure_agent_sdd`, `mcp_launch_spec`, `register_mcp_claude`,
-   `register_mcp_codex`, `register_core_mcp_claude`, `register_core_mcp_codex`,
-   etc. with paths inside the extension repo, and append its own
+3. Call `install_tree`, `install_file`, `remove_installed_tree`,
+   `install_hook`, `install_cursor_hook`, `install_skills`,
+   `install_permission_rules`, `install_teams_env`, `install_codex_subagents`,
+   `install_codex_review_hook`, `install_cursor_review_hook`,
+   `install_codex_review_skills`, `build_cursor_rules`, `teams_section`,
+   `ensure_mcp_npm_global`, `ensure_agent_sdd`, `mcp_launch_spec`,
+   `register_mcp_claude`, `register_mcp_codex`, `register_mcp_cursor`,
+   `register_core_mcp_claude`, `register_core_mcp_codex`,
+   `register_core_mcp_cursor`, etc. with paths inside the extension repo, and
+   append its own
    `## <Section>` blocks to `$AGENT_HOME/.claude/CLAUDE.md` after the core
    driver has written it.
 
@@ -345,8 +420,11 @@ header and remain backwards-compatible across patch releases.
   `~/.claude/projects/*/memory/` — not managed by this repo.
 - Skills you authored yourself in `~/.claude/skills/` or `~/.agents/skills/` —
   install.sh only touches subdirs that match a name in this repo's `skills/` or
-  `codex-review/skills/`, and dropping the review bundle removes only symlinks
-  that point back into this repo.
+  `codex-review/skills/`, and dropping the review bundle removes only the files
+  its own manifest lists.
+- Rules you keep in `~/.cursor/rules/` yourself — only `<name>.mdc` files this
+  repo generated are written or removed there. Cursor's account-synced User
+  Rules, project `.cursor/rules/`, and `~/.cursor/plugins/` are not touched.
 - `~/.codex/config.toml` — only `[mcp_servers.<name>]` and, with `--teams`,
   `features.multi_agent` (written by `codex features enable`) and
   `agents.enabled`. Everything else, including `[agents.<name>]` role
