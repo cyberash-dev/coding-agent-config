@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Install symlinks from this repo into per-user agent config locations and
-# register hooks in ~/.claude/settings.json.
+# Copy this repo's rules, hooks and skills into per-user agent config locations
+# and register hooks in ~/.claude/settings.json.
 #
-# Usage: install.sh <claude|codex|all> [--sdd] [--teams] [--codex-review]
+# Usage: install.sh <claude|codex|cursor|all> [--sdd] [--teams] [--codex-review]
 #                   [--update-mcps] [--lang=ru|en]
 #
 # --lang  Pin the agent's reply language. Without it, the agent replies in
 #         whatever language the operator used. With `--lang=ru` or
 #         `--lang=en`, it always replies in that language. The directive is
-#         appended to the generated ~/.claude/CLAUDE.md and build/AGENTS.md.
+#         appended to the generated ~/.claude/CLAUDE.md and build/AGENTS.md, and
+#         published as language.mdc among the Cursor rules.
 #
 # --sdd   Install the `agent-sdd` npm package (Spec-Driven Development
 #         tooling) globally so the `sdd` bin lands on PATH, then run
@@ -29,19 +30,26 @@
 #         codex-cli-review skills, plus the codex-commit-review PreToolUse hook,
 #         which runs every `git commit` / `arc commit` through codex twice — a
 #         review pass driven by the codex-cli-review skill and a workspace-write
-#         pass that edits the files. The skills land on both surfaces; the hook
-#         speaks the Claude Code hook protocol, so it is registered for
-#         claude/all only. Without the flag, both are removed.
+#         pass that edits the files. The skills land on every surface; the hook
+#         is registered for claude (PreToolUse) and cursor (beforeShellExecution),
+#         Codex has no hook configuration to put it in. Without the flag, both
+#         are removed.
 #
 # --update-mcps
 #         Update already installed npm-backed MCP packages to npm latest
 #         without prompting instead of asking per package.
 #
-# Hooks: install.sh always installs hooks from `hooks/`. Hook registration
-# in settings.json is idempotent — entries pointing at the canonical paths
-# are upserted, stale entries with the same script basename are removed.
+# Hooks: install.sh always installs the scripts from `hooks/`. Registration in
+# ~/.claude/settings.json and ~/.cursor/hooks.json is idempotent — the entry
+# this repo owns is replaced where it already sits, a same-name hook of the
+# user's own is left alone, and repeats of one command in an event collapse.
 #
-# Existing files at target paths are renamed to <target>.bak.<unix-timestamp>.
+# Rules, hooks and skills are copied, not symlinked: editing this repo takes
+# effect on the next install.sh run. What the installer wrote is recorded in a
+# .coding-agent-config manifest next to the copies, so a later run can take its
+# own files back out without touching anything the user keeps there. Files at
+# target paths that this repo does not own are renamed to
+# <target>.bak.<unix-timestamp>.
 #
 # Downstream extension repos embed this repo as a git submodule and source
 # `scripts/lib/install-lib.sh` from their own driver scripts to compose
@@ -56,13 +64,15 @@ source "$REPO_ROOT/scripts/lib/install-lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 <claude|codex|all> [--sdd] [--teams] [--codex-review] [--update-mcps] [--lang=ru|en]
+Usage: $0 <claude|codex|cursor|all> [--sdd] [--teams] [--codex-review] [--update-mcps] [--lang=ru|en]
 
-  claude   generate ~/.claude/CLAUDE.md, symlink ~/.claude/rules and
+  claude   generate ~/.claude/CLAUDE.md, copy ~/.claude/rules and
            ~/.claude/hooks
-  codex    build AGENTS.md, symlink ${CODEX_HOME:-~/.codex}/AGENTS.md,
-           and symlink skills into ~/.agents/skills
-  all      both
+  codex    build AGENTS.md, copy it to ${CODEX_HOME:-~/.codex}/AGENTS.md,
+           and copy skills into ~/.agents/skills
+  cursor   build the .mdc rule set into ~/.cursor/rules, copy hooks into
+           ~/.cursor/hooks and skills into ~/.agents/skills
+  all      all three
 
   --lang   pin the reply language to ru or en. Omit to keep replying in
            the operator's own language.
@@ -109,11 +119,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# The review hook speaks the Claude Code hook protocol and is registered in
-# ~/.claude/settings.json, so the codex mode has nowhere to put it. Say what the
-# flag does there instead of leaving the missing hook unexplained.
+# Codex has no hook configuration of its own, so the codex mode has nowhere to
+# put the review hook. Say what the flag does there instead of leaving the
+# missing hook unexplained.
 if [[ "$CODEX_REVIEW" -eq 1 && "$MODE" == "codex" ]]; then
-  echo "install.sh: --codex-review installs the review skills; the commit hook is claude/all only" >&2
+  echo "install.sh: --codex-review installs the review skills; the commit hook is claude/cursor only" >&2
 fi
 
 CODEX_CONFIG_DIR="${CODEX_HOME:-$AGENT_HOME/.codex}"
@@ -152,12 +162,12 @@ install_claude() {
     "$(cat "$REPO_ROOT/CLAUDE.md"; printf '\n'; \
        teams_section "$TEAMS" "$REPO_ROOT/templates/teams"; \
        language_section "$LANG_MODE" "$REPO_ROOT/templates/language")"
-  link "$REPO_ROOT/rules" "$AGENT_HOME/.claude/rules"
-  link "$REPO_ROOT/hooks" "$AGENT_HOME/.claude/hooks"
+  install_tree "$REPO_ROOT/rules" "$AGENT_HOME/.claude/rules"
+  install_tree "$REPO_ROOT/hooks" "$AGENT_HOME/.claude/hooks"
   install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.claude/skills"
   install_codex_review_skills "$CODEX_REVIEW" "$REVIEW_SKILLS" "$AGENT_HOME/.claude/skills"
 
-  remove_hook "lsp-reminder.sh" "PreToolUse"
+  remove_hook "$AGENT_HOME/.claude/hooks/lsp-reminder.sh" "PreToolUse"
   install_hook "$AGENT_HOME/.claude/hooks/code-navigation-reminder.sh" "Grep|Read" "PreToolUse"
   install_codex_review_hook "$CODEX_REVIEW"
 
@@ -167,10 +177,15 @@ install_claude() {
 
 install_codex() {
   echo "[codex]"
+  # Codex reads AGENTS.override.md instead of AGENTS.md when it exists, so the
+  # install would look successful while the instructions never load.
+  if [[ -e "$CODEX_CONFIG_DIR/AGENTS.override.md" ]]; then
+    echo "  ! $CODEX_CONFIG_DIR/AGENTS.override.md shadows AGENTS.md; Codex will not read this install" >&2
+  fi
   local build_args=(--lang="$LANG_MODE")
   [[ "$TEAMS" -eq 1 ]] && build_args+=(--teams)
   "$REPO_ROOT/scripts/build.sh" "${build_args[@]}"
-  link "$REPO_ROOT/build/AGENTS.md" "$CODEX_CONFIG_DIR/AGENTS.md"
+  install_file "$REPO_ROOT/build/AGENTS.md" "$CODEX_CONFIG_DIR/AGENTS.md"
   install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.agents/skills"
   install_codex_review_skills "$CODEX_REVIEW" "$REVIEW_SKILLS" "$AGENT_HOME/.agents/skills"
   cleanup_legacy_codex_skills "$REPO_ROOT/skills" "$REVIEW_SKILLS"
@@ -179,9 +194,26 @@ install_codex() {
   install_codex_subagents "$TEAMS"
 }
 
+install_cursor() {
+  echo "[cursor]"
+  local build_args=(--lang="$LANG_MODE")
+  [[ "$TEAMS" -eq 1 ]] && build_args+=(--teams)
+  "$REPO_ROOT/scripts/build-cursor.sh" "${build_args[@]}"
+  install_tree "$REPO_ROOT/build/cursor/rules" "$AGENT_HOME/.cursor/rules"
+  install_tree "$REPO_ROOT/hooks" "$AGENT_HOME/.cursor/hooks"
+  # ~/.agents/skills is read by Codex and Cursor alike, so both modes share one
+  # copy instead of installing the same skill twice.
+  install_skills "$REPO_ROOT/skills" "$AGENT_HOME/.agents/skills"
+  install_codex_review_skills "$CODEX_REVIEW" "$REVIEW_SKILLS" "$AGENT_HOME/.agents/skills"
+
+  install_cursor_review_hook "$CODEX_REVIEW"
+
+  register_core_mcp_cursor
+}
+
 case "$MODE" in
-  claude|codex|all) ;;
-  *)                usage ;;
+  claude|codex|cursor|all) ;;
+  *)                       usage ;;
 esac
 
 require_deps
@@ -194,18 +226,30 @@ fi
 case "$MODE" in
   claude) install_claude ;;
   codex)  install_codex ;;
-  all)    install_claude; install_codex ;;
+  cursor) install_cursor ;;
+  all)    install_claude; install_codex; install_cursor ;;
 esac
 
 # agent-sdd writes its own rules/skill/hooks into the target config(s); run it
-# last so build.sh's regeneration of build/AGENTS.md happens before agent-sdd
-# appends to the symlinked ~/.codex/AGENTS.md.
+# last so the build steps finish before agent-sdd appends to the installed
+# ~/.codex/AGENTS.md. It targets claude and codex; there is no cursor mode.
 if [[ "$SDD" -eq 1 ]]; then
-  if command -v sdd >/dev/null 2>&1; then
+  if [[ "$MODE" == "cursor" ]]; then
+    echo "install.sh: agent-sdd has no cursor target; skipping 'sdd install'" >&2
+  elif command -v sdd >/dev/null 2>&1; then
     sdd install "$MODE"
   else
     echo "install.sh: sdd not on PATH; skipping 'sdd install $MODE'" >&2
   fi
 fi
+
+# Last word on the hook files: a tool that merged its own hooks after us (see
+# --sdd) can leave a second entry for a script that is already registered.
+case "$MODE" in
+  claude|all) dedupe_hooks ;;
+esac
+case "$MODE" in
+  cursor|all) dedupe_cursor_hooks ;;
+esac
 
 echo "install.sh: done."

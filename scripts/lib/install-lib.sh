@@ -6,24 +6,31 @@
 # Idempotent: safe to source multiple times; globals are initialised once.
 #
 # Public API (functions):
-#   link <source> <target>
+#   install_tree <source_dir> <target_dir>
+#   install_file <source> <target>
+#   remove_installed_tree <target_dir>
 #   write_generated <target> <content>
 #   install_hook <script> <matcher> <event>
-#   remove_hook <basename> <event>
+#   remove_hook <script|basename> <event>
 #   install_permission_rules <allow|deny|ask> <rule> [<rule>...]
 #   install_teams_env <0|1>
 #   install_codex_subagents <0|1>
 #   install_codex_review_hook <0|1>
+#   install_cursor_hook <script> <event> [<matcher>]
+#   remove_cursor_hook <script|basename> <event>
+#   install_cursor_review_hook <0|1>
+#   dedupe_hooks / dedupe_cursor_hooks
 #   install_codex_review_skills <0|1> <source_root> <target_root>
 #   install_skills <source_root> <target_root>
 #   cleanup_legacy_codex_skills <source_root> [<source_root>...]
-#   unlink_if_repo_owned <target> <abs_source_root>
 #   inline_imports <source_file> <output_file> <prefix>=<root> [<prefix>=<root>...]
+#   build_cursor_rules <index_file> <rules_root> <out_dir>
+#   write_cursor_rule <out_file> <description> <body_file>
 #   teams_section <0|1> <templates_dir>
 #   language_section <lang> <templates_dir>
 #   ensure_agent_sdd
 #   mcp_launch_spec <pkg> <bin>
-#   register_core_mcp_claude / register_core_mcp_codex
+#   register_core_mcp_claude / register_core_mcp_codex / register_core_mcp_cursor
 #
 # `ensure_mcp_npm_global <pkg> <bin>` comes from lib/npm-mcp-updates.sh and
 # `os_kind` / `is_windows` / `agent_home` / `native_path` from lib/platform.sh,
@@ -31,8 +38,13 @@
 #
 # Public globals (set on first source):
 #   TS                   — install timestamp, used for `.bak.<TS>` backups
+#   AGENT_CONFIG_MANIFEST — name of the per-directory ownership manifest
 #   SETTINGS             — path to $AGENT_HOME/.claude/settings.json
-#   SETTINGS_BACKED_UP   — 0/1 flag, mutated by every $SETTINGS writer
+#   CURSOR_HOOKS         — path to $AGENT_HOME/.cursor/hooks.json
+#   CURSOR_MCP           — path to $AGENT_HOME/.cursor/mcp.json
+#   SETTINGS_BACKED_UP   — 0/1 flag, mutated by every $SETTINGS writer; also set
+#                          when the installer created the file itself, so an
+#                          empty scaffold is never backed up
 #
 # Targets are anchored at $AGENT_HOME (see lib/platform.sh), which equals $HOME
 # everywhere except native Windows.
@@ -48,6 +60,7 @@ if [[ -z "${AGENT_CONFIG_LIB_LOADED:-}" ]]; then
   AGENT_CONFIG_LIB_LOADED=1
 
   TS="$(date +%s)"
+  AGENT_CONFIG_MANIFEST=".coding-agent-config"
   SETTINGS="$AGENT_HOME/.claude/settings.json"
   SETTINGS_BACKED_UP=0
 
@@ -56,6 +69,12 @@ if [[ -z "${AGENT_CONFIG_LIB_LOADED:-}" ]]; then
 
   CODEX_CONFIG_TOML="${CODEX_HOME:-$AGENT_HOME/.codex}/config.toml"
   CODEX_CONFIG_BACKED_UP=0
+
+  CURSOR_HOOKS="$AGENT_HOME/.cursor/hooks.json"
+  CURSOR_HOOKS_BACKED_UP=0
+
+  CURSOR_MCP="$AGENT_HOME/.cursor/mcp.json"
+  CURSOR_MCP_BACKED_UP=0
 fi
 
 # Back up $SETTINGS once per install run (first mutation only).
@@ -67,108 +86,360 @@ _backup_settings_once() {
   fi
 }
 
-link() {
+# Same for a JSON file, comparing by value rather than by bytes: the agents
+# rewrite their own config with their own formatting between installs, and
+# reformatting it back would rewrite the file (and back it up) on every run.
+_replace_json_if_changed() {
+  local file="$1"
+  local candidate="$2"
+  local backup_fn="$3"
+
+  if cmp -s <(jq -S . "$candidate" 2>/dev/null) <(jq -S . "$file" 2>/dev/null); then
+    rm -f "$candidate"
+    return 1
+  fi
+
+  _replace_if_changed "$file" "$candidate" "$backup_fn"
+}
+
+# Replace <file> with the freshly built <candidate> only when the content really
+# differs, so a repeat install neither rewrites config nor leaves another backup
+# behind. Returns 1 when the file was already what the installer wanted.
+_replace_if_changed() {
+  local file="$1"
+  local candidate="$2"
+  local backup_fn="$3"
+
+  if cmp -s "$candidate" "$file"; then
+    rm -f "$candidate"
+    return 1
+  fi
+
+  "$backup_fn"
+  mv "$candidate" "$file"
+  return 0
+}
+
+_backup_cursor_hooks_once() {
+  if [[ "$CURSOR_HOOKS_BACKED_UP" -eq 0 ]]; then
+    cp "$CURSOR_HOOKS" "${CURSOR_HOOKS}.bak.${TS}"
+    echo "  ~ backed up $CURSOR_HOOKS -> ${CURSOR_HOOKS}.bak.${TS}"
+    CURSOR_HOOKS_BACKED_UP=1
+  fi
+}
+
+_backup_cursor_mcp_once() {
+  if [[ "$CURSOR_MCP_BACKED_UP" -eq 0 ]]; then
+    cp "$CURSOR_MCP" "${CURSOR_MCP}.bak.${TS}"
+    echo "  ~ backed up $CURSOR_MCP -> ${CURSOR_MCP}.bak.${TS}"
+    CURSOR_MCP_BACKED_UP=1
+  fi
+}
+
+# Copy <source_dir> into <target_dir>. Files identical to the source are left
+# alone, so a repeat install writes nothing. What the installer put there is
+# recorded in <target_dir>/.coding-agent-config, which lets the next run take
+# its own files back out (a rule dropped from the index, a bundle switched off)
+# without touching anything the user keeps in the same directory.
+install_tree() {
   local source="$1"
   local target="$2"
 
-  if [[ ! -e "$source" ]]; then
+  if [[ ! -d "$source" ]]; then
     echo "install-lib: source missing: $source" >&2
     exit 1
   fi
 
-  mkdir -p "$(dirname "$target")"
+  _clear_linked_target "$target" "$source"
+  mkdir -p "$target"
 
-  if is_windows; then
-    _link_windows "$source" "$target"
+  local -a installed=()
+  local copied=0 removed=0
+  local rel
+  while IFS= read -r rel; do
+    installed+=("$rel")
+    if _install_one_file "$source/$rel" "$target/$rel" "$target" "$rel"; then
+      copied=$((copied + 1))
+    fi
+  done < <(_tree_files "$source")
+
+  local previous
+  while IFS= read -r previous; do
+    [[ -n "$previous" ]] || continue
+    if _array_has "$previous" ${installed[@]+"${installed[@]}"}; then
+      continue
+    fi
+    [[ -e "$target/$previous" ]] || continue
+    rm -f "$target/$previous"
+    _prune_empty_dirs "$target" "$(dirname "$target/$previous")"
+    echo "  - removed $target/$previous"
+    removed=$((removed + 1))
+  done < <(_manifest_read "$target")
+
+  _manifest_write "$target" ${installed[@]+"${installed[@]}"}
+
+  if [[ "$copied" -eq 0 && "$removed" -eq 0 ]]; then
+    echo "  = $target (up to date)"
   else
-    _link_posix "$source" "$target"
+    echo "  + $target ($copied copied, $removed removed)"
   fi
 }
 
-_link_posix() {
+# Copy a single generated file into place, with the same ownership record as
+# install_tree so only a file the user wrote by hand is ever backed up.
+install_file() {
   local source="$1"
   local target="$2"
 
-  if [[ -L "$target" ]]; then
-    local current
-    current="$(readlink "$target")"
-    if [[ "$current" == "$source" ]]; then
-      echo "  = $target -> $source (already linked)"
-      return 0
-    fi
+  if [[ ! -f "$source" ]]; then
+    echo "install-lib: source missing: $source" >&2
+    exit 1
   fi
 
-  _clear_link_target "$target"
-  ln -snf "$source" "$target"
-  echo "  + $target -> $source"
+  _clear_linked_target "$target" "$source"
+
+  local dir base
+  dir="$(dirname "$target")"
+  base="$(basename "$target")"
+  mkdir -p "$dir"
+
+  if _install_one_file "$source" "$target" "$dir" "$base"; then
+    echo "  + $target (copied)"
+  else
+    echo "  = $target (up to date)"
+  fi
+  _manifest_add "$dir" "$base"
 }
 
-# Windows has no usable `ln -s`: Git Bash copies unless Developer Mode is on.
-# Directories become NTFS junctions, which need no elevation and keep the
-# repo-is-live model. A single file (build/AGENTS.md) has no junction
-# equivalent, so it is copied and has to be refreshed by re-running install.
-_link_windows() {
-  local source="$1"
-  local target="$2"
-
-  if [[ -d "$source" ]]; then
-    if is_same_dir "$target" "$source"; then
-      echo "  = $target -> $source (already linked)"
-      return 0
-    fi
-    _clear_link_target "$target"
-    create_junction "$target" "$source"
-    echo "  + $target -> $source (junction)"
-    return 0
-  fi
-
-  if [[ -f "$target" ]] && cmp -s "$source" "$target"; then
-    echo "  = $target -> $source (already copied)"
-    return 0
-  fi
-
-  _clear_link_target "$target"
-  cp "$source" "$target"
-  echo "  + $target -> $source (copied)"
-}
-
-# A junction is unlinked rather than moved aside: `mv` on a junction walks into
-# it and drags the contents out of the repo.
-_clear_link_target() {
+# Remove the files this repo installed under <target_dir> and nothing else.
+# The directory itself goes only if it is left empty.
+remove_installed_tree() {
   local target="$1"
+  [[ -d "$target" ]] || return 0
+
+  local rel removed=0
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    [[ -e "$target/$rel" ]] || continue
+    rm -f "$target/$rel"
+    _prune_empty_dirs "$target" "$(dirname "$target/$rel")"
+    removed=$((removed + 1))
+  done < <(_manifest_read "$target")
+
+  rm -f "$(_manifest_path "$target")"
+  rmdir "$target" 2>/dev/null || true
+
+  if [[ "$removed" -gt 0 ]]; then
+    echo "  - removed $target"
+  fi
+  return 0
+}
+
+# Copy <src> to <dst> unless they already match. Returns 0 when the file was
+# written, 1 when it was already in place.
+_install_one_file() {
+  local src="$1"
+  local dst="$2"
+  local target="$3"
+  local rel="$4"
+
+  if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$dst")"
+  if [[ -e "$dst" || -L "$dst" ]] && ! _manifest_owns "$target" "$rel"; then
+    mv "$dst" "${dst}.bak.${TS}"
+    echo "  ~ backed up $dst -> ${dst}.bak.${TS}"
+  fi
+  cp -p "$src" "$dst"
+  return 0
+}
+
+# Paths of every file under <dir>, relative to it. What .gitignore keeps out of
+# the repo is kept out of the install too: a copy would otherwise carry the
+# local build junk of whoever ran install.sh.
+_tree_files() {
+  (cd "$1" && find . \( -name .git -o -name __pycache__ \) -prune -o \
+      -type f ! -name '*.pyc' ! -name '.DS_Store' ! -name '*.bak.*' -print) \
+    | sed 's|^\./||' | LC_ALL=C sort
+}
+
+# Drop directories the removals just emptied, walking up to <root> and stopping
+# at the first one that still holds something.
+_prune_empty_dirs() {
+  local root="$1"
+  local dir="$2"
+
+  while [[ "$dir" != "$root" && "$dir" == "$root"/* ]]; do
+    rmdir "$dir" 2>/dev/null || break
+    dir="$(dirname "$dir")"
+  done
+}
+
+_array_has() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+# An earlier version of this installer symlinked the repo into place. Take that
+# link out before the copy lands. A junction is unlinked rather than moved
+# aside: `mv` on a junction walks into it and drags the contents out of the repo.
+_clear_linked_target() {
+  local target="$1"
+  local source="$2"
 
   if is_windows && is_junction "$target"; then
     remove_junction "$target"
-    echo "  - unlinked $target"
+    echo "  - unlinked $target (copied from now on)"
     return 0
   fi
 
-  if [[ -e "$target" || -L "$target" ]]; then
-    local backup="${target}.bak.${TS}"
-    mv "$target" "$backup"
-    echo "  ~ backed up $target -> $backup"
+  [[ -L "$target" ]] || return 0
+
+  if [[ "$(readlink "$target")" == "$source" ]]; then
+    rm -f "$target"
+    echo "  - unlinked $target (copied from now on)"
+    return 0
   fi
+
+  mv "$target" "${target}.bak.${TS}"
+  echo "  ~ backed up $target -> ${target}.bak.${TS}"
 }
 
+_manifest_path() {
+  printf '%s/%s' "$1" "$AGENT_CONFIG_MANIFEST"
+}
+
+_manifest_read() {
+  local manifest
+  manifest="$(_manifest_path "$1")"
+  [[ -f "$manifest" ]] || return 0
+  cat "$manifest"
+}
+
+_manifest_owns() {
+  _manifest_read "$1" | grep -Fxq -- "$2"
+}
+
+_manifest_write() {
+  local target="$1"
+  shift
+
+  local manifest
+  manifest="$(_manifest_path "$target")"
+  if [[ $# -eq 0 ]]; then
+    rm -f "$manifest"
+    return 0
+  fi
+  printf '%s\n' "$@" > "$manifest"
+}
+
+_manifest_add() {
+  local target="$1"
+  local entry="$2"
+
+  if _manifest_owns "$target" "$entry"; then
+    return 0
+  fi
+  printf '%s\n' "$entry" >> "$(_manifest_path "$target")"
+}
+
+# Write a file this installer owns. Recorded in the same manifest install_tree
+# uses, so the first version of a file the user wrote by hand is backed up and
+# later regenerations just overwrite what this installer put there.
 write_generated() {
   local target="$1"
   local content="$2"
 
-  mkdir -p "$(dirname "$target")"
+  local dir base
+  dir="$(dirname "$target")"
+  base="$(basename "$target")"
+  mkdir -p "$dir"
 
-  if [[ -e "$target" || -L "$target" ]]; then
+  if [[ -f "$target" && ! -L "$target" ]] && [[ "$(cat "$target")" == "$content" ]]; then
+    _manifest_add "$dir" "$base"
+    echo "  = $target (up to date)"
+    return 0
+  fi
+
+  if [[ -e "$target" || -L "$target" ]] && ! _manifest_owns "$dir" "$base"; then
     local backup="${target}.bak.${TS}"
     mv "$target" "$backup"
     echo "  ~ backed up $target -> $backup"
   fi
 
   printf '%s' "$content" > "$target"
+  _manifest_add "$dir" "$base"
   echo "  + $target (generated)"
 }
 
+# jq helpers shared by both hook writers.
+#   is_named     — an entry for a script with this file name, whoever wrote it
+#   is_ours      — that name, installed from the directory this install uses
+#   is_removable — what remove_hook may delete: ours, or any same-name entry
+#                  when the caller passed a bare basename
+_HOOK_JQ_HELPERS='
+  def dirname: sub("/[^/]*$"; "");
+  def is_named: (.command // "") as $c
+    | ($c == $basename) or ($c | endswith("/" + $basename));
+  def is_ours: is_named and ((.command // "") as $c
+    | ($c == $script) or (($c | dirname) == $dir));
+  def is_removable: is_named and (($dir == "")
+    or ((.command // "") as $c | ($c == $script) or (($c | dirname) == $dir)));
+'
+
+# Collapse repeats of one command inside a single event, keeping the LAST
+# registration. It is the current one — a tool that re-registers its hook under
+# a new matcher finds its own entry next time and stops adding a second.
+_HOOK_JQ_DEDUPE='
+  def dedupe_event:
+    . as $entries
+    | ( reduce range(0; $entries | length) as $i ({};
+          reduce (($entries[$i].hooks // [])[] | .command // "") as $command (.;
+            .[$command] = $i) ) ) as $last
+    | [ range(0; $entries | length) as $i
+        | $entries[$i]
+        | .hooks = [ (.hooks // [])[] | select($last[.command // ""] == $i) ]
+        | select((.hooks | length) > 0) ];
+'
+
+_CURSOR_HOOK_JQ_DEDUPE='
+  def dedupe_event:
+    . as $entries
+    | ( reduce range(0; $entries | length) as $i ({};
+          .[$entries[$i].command // ""] = $i) ) as $last
+    | [ range(0; $entries | length) as $i
+        | select($last[$entries[$i].command // ""] == $i)
+        | $entries[$i] ];
+'
+
+_warn_foreign_hooks() {
+  local others="$1"
+  local basename="$2"
+  [[ -n "$others" ]] || return 0
+
+  local other
+  while IFS= read -r other; do
+    [[ -n "$other" ]] || continue
+    echo "  ! $other also registers $basename; left as is" >&2
+  done <<< "$others"
+}
+
 # Idempotently register a hook in $SETTINGS.
-# Removes any prior entries whose command ends with the same basename, then
-# appends a fresh entry pointing at the canonical path.
+#
+# Ownership: an entry belongs to this installer when its command is the script
+# being installed, or another script of the same name from the same directory.
+# Those entries are taken out of every event first, so a hook that moved to a
+# different event does not stay registered on the old one. A same-name hook
+# pointing at a path the user owns is left alone with a warning — two different
+# scripts may legitimately share a file name. Repeats of one command inside the
+# target event, whoever wrote them, collapse to the first one.
 install_hook() {
   local script="$1"
   local matcher="$2"
@@ -184,20 +455,28 @@ install_hook() {
   mkdir -p "$(dirname "$SETTINGS")"
   if [[ ! -f "$SETTINGS" ]]; then
     echo '{}' > "$SETTINGS"
+    SETTINGS_BACKED_UP=1
   fi
-
-  _backup_settings_once
 
   # The agent reads settings.json as a native process, so the command has to be
   # a path it can resolve. On Windows a shell-form hook falls back to PowerShell
   # when Git Bash is missing, where a .sh script cannot run — name the shell so
   # that failure is legible instead of silent.
-  local command_path shell
+  local command_path shell dir
   command_path="$(native_path "$script")"
+  dir="$(dirname "$command_path")"
   shell=""
   if is_windows; then
     shell="bash"
   fi
+
+  _warn_foreign_hooks "$(jq -r \
+    --arg script "$command_path" --arg basename "$basename" --arg dir "$dir" \
+    "$_HOOK_JQ_HELPERS"'
+    [ (.hooks // {}) | to_entries[] | .value[]? | (.hooks // [])[]?
+      | select(is_named and (is_ours | not)) | .command ]
+    | unique | .[]
+  ' "$SETTINGS")" "$basename"
 
   local tmp
   tmp="$(mktemp)"
@@ -205,32 +484,35 @@ install_hook() {
      --arg matcher "$matcher" \
      --arg event "$event" \
      --arg basename "$basename" \
-     --arg shell "$shell" '
+     --arg dir "$dir" \
+     --arg shell "$shell" \
+     "$_HOOK_JQ_HELPERS$_HOOK_JQ_DEDUPE"'
     .hooks //= {}
     | .hooks[$event] //= []
-    | .hooks[$event] |= (
-        map(
-          .hooks |= map(select((.command // "") | endswith($basename) | not))
-        )
-        | map(select((.hooks // []) | length > 0))
+    | ( [ .hooks[$event] | to_entries[]
+          | select((.value.hooks // []) | any(is_ours)) | .key ] | first ) as $at
+    | .hooks |= with_entries(
+        .value |= ( map(.hooks |= map(select(is_ours | not)))
+                    | map(select((.hooks // []) | length > 0)) )
       )
-    | .hooks[$event] += [
-        ( {hooks: [
-             ( {type: "command", command: $script}
-               + ( if $shell == "" then {} else {shell: $shell} end )
-             )
-           ]}
-          + ( if $matcher == "" then {} else {matcher: $matcher} end )
-        )
-      ]
+    | .hooks[$event] //= []
+    | .hooks[$event] |= dedupe_event
+    | ( {hooks: [ ({type: "command", command: $script}
+                   + (if $shell == "" then {} else {shell: $shell} end)) ]}
+        + (if $matcher == "" then {} else {matcher: $matcher} end) ) as $entry
+    | .hooks[$event] |= (if $at == null then . + [$entry] else .[0:$at] + [$entry] + .[$at:] end)
   ' "$SETTINGS" > "$tmp"
-  mv "$tmp" "$SETTINGS"
-  echo "  + hook $event${matcher:+ ($matcher)} -> $command_path"
+  if _replace_json_if_changed "$SETTINGS" "$tmp" _backup_settings_once; then
+    echo "  + hook $event${matcher:+ ($matcher)} -> $command_path"
+  else
+    echo "  = hook $event${matcher:+ ($matcher)} -> $command_path (registered)"
+  fi
 }
 
-# Drop any hook entries whose command ends with <basename> from <event>.
+# Drop hook entries for <script> from <event>. Pass the installed path to keep a
+# same-name hook the user owns; a bare basename matches on the name alone.
 remove_hook() {
-  local basename="$1"
+  local script="$1"
   local event="$2"
 
   [[ -f "$SETTINGS" ]] || return 0
@@ -240,34 +522,159 @@ remove_hook() {
     exit 1
   fi
 
-  local has_match
-  has_match="$(jq --arg event "$event" --arg basename "$basename" '
-    [ (.hooks[$event] // [])[]?.hooks[]?.command // ""
-      | select(endswith($basename))
-    ] | length
-  ' "$SETTINGS")"
-
-  if [[ "$has_match" == "0" ]]; then
-    return 0
+  local basename command_path dir
+  basename="$(basename "$script")"
+  command_path=""
+  dir=""
+  if [[ "$script" == */* ]]; then
+    command_path="$(native_path "$script")"
+    dir="$(dirname "$command_path")"
   fi
-
-  _backup_settings_once
 
   local tmp
   tmp="$(mktemp)"
-  jq --arg event "$event" --arg basename "$basename" '
+  jq --arg event "$event" --arg script "$command_path" \
+     --arg basename "$basename" --arg dir "$dir" \
+     "$_HOOK_JQ_HELPERS"'
     .hooks //= {}
     | if .hooks[$event] then
         .hooks[$event] |= (
-          map(
-            .hooks |= map(select((.command // "") | endswith($basename) | not))
-          )
+          map(.hooks |= map(select(is_removable | not)))
           | map(select((.hooks // []) | length > 0))
         )
       else . end
   ' "$SETTINGS" > "$tmp"
-  mv "$tmp" "$SETTINGS"
-  echo "  - hook $event ($basename) removed"
+  if _replace_json_if_changed "$SETTINGS" "$tmp" _backup_settings_once; then
+    echo "  - hook $event ($basename) removed"
+  fi
+}
+
+# Idempotently register a hook in ~/.cursor/hooks.json. Cursor has its own hook
+# protocol — different event names, a flat entry per event, `permission` instead
+# of `permissionDecision` — so it gets its own writer rather than a second
+# target for install_hook. Ownership and de-duplication work as they do there.
+install_cursor_hook() {
+  local script="$1"
+  local event="$2"
+  local matcher="${3:-}"
+  local basename
+  basename="$(basename "$script")"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "install-lib: jq is required to register hooks" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$CURSOR_HOOKS")"
+  if [[ ! -f "$CURSOR_HOOKS" ]]; then
+    echo '{"version": 1, "hooks": {}}' > "$CURSOR_HOOKS"
+    CURSOR_HOOKS_BACKED_UP=1
+  fi
+
+  local command_path dir
+  command_path="$(native_path "$script")"
+  dir="$(dirname "$command_path")"
+
+  _warn_foreign_hooks "$(jq -r \
+    --arg script "$command_path" --arg basename "$basename" --arg dir "$dir" \
+    "$_HOOK_JQ_HELPERS"'
+    [ (.hooks // {}) | to_entries[] | .value[]?
+      | select(is_named and (is_ours | not)) | .command ]
+    | unique | .[]
+  ' "$CURSOR_HOOKS")" "$basename"
+
+  local tmp
+  tmp="$(mktemp)"
+  jq --arg script "$command_path" \
+     --arg matcher "$matcher" \
+     --arg event "$event" \
+     --arg basename "$basename" \
+     --arg dir "$dir" \
+     "$_HOOK_JQ_HELPERS$_CURSOR_HOOK_JQ_DEDUPE"'
+    .version = 1
+    | .hooks //= {}
+    | .hooks[$event] //= []
+    | ( [ .hooks[$event] | to_entries[] | select(.value | is_ours) | .key ] | first ) as $at
+    | .hooks |= with_entries(.value |= map(select(is_ours | not)))
+    | .hooks[$event] //= []
+    | .hooks[$event] |= dedupe_event
+    | ( {command: $script}
+        + (if $matcher == "" then {} else {matcher: $matcher} end) ) as $entry
+    | .hooks[$event] |= (if $at == null then . + [$entry] else .[0:$at] + [$entry] + .[$at:] end)
+  ' "$CURSOR_HOOKS" > "$tmp"
+  if _replace_json_if_changed "$CURSOR_HOOKS" "$tmp" _backup_cursor_hooks_once; then
+    echo "  + cursor hook $event${matcher:+ ($matcher)} -> $command_path"
+  else
+    echo "  = cursor hook $event${matcher:+ ($matcher)} -> $command_path (registered)"
+  fi
+}
+
+# Drop ~/.cursor/hooks.json entries for <script> from <event>. Same argument
+# rule as remove_hook: a path keeps a same-name hook the user owns.
+remove_cursor_hook() {
+  local script="$1"
+  local event="$2"
+
+  [[ -f "$CURSOR_HOOKS" ]] || return 0
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "install-lib: jq is required to manage hooks" >&2
+    exit 1
+  fi
+
+  local basename command_path dir
+  basename="$(basename "$script")"
+  command_path=""
+  dir=""
+  if [[ "$script" == */* ]]; then
+    command_path="$(native_path "$script")"
+    dir="$(dirname "$command_path")"
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  jq --arg event "$event" --arg script "$command_path" \
+     --arg basename "$basename" --arg dir "$dir" \
+     "$_HOOK_JQ_HELPERS"'
+    if .hooks[$event] then
+      .hooks[$event] |= map(select(is_removable | not))
+    else . end
+  ' "$CURSOR_HOOKS" > "$tmp"
+  if _replace_json_if_changed "$CURSOR_HOOKS" "$tmp" _backup_cursor_hooks_once; then
+    echo "  - cursor hook $event ($basename) removed"
+  fi
+}
+
+# Collapse duplicate hook registrations across every event of $SETTINGS.
+# install_hook already does this for the event it writes; this runs at the end
+# of an install because a tool that merges its own hooks afterwards (agent-sdd)
+# can add a second entry for a script already registered under a wider matcher.
+dedupe_hooks() {
+  [[ -f "$SETTINGS" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+
+  local tmp
+  tmp="$(mktemp)"
+  jq "$_HOOK_JQ_DEDUPE"'
+    if .hooks then .hooks |= with_entries(.value |= dedupe_event) else . end
+  ' "$SETTINGS" > "$tmp"
+  if _replace_json_if_changed "$SETTINGS" "$tmp" _backup_settings_once; then
+    echo "  - collapsed duplicate hook registrations in $SETTINGS"
+  fi
+}
+
+dedupe_cursor_hooks() {
+  [[ -f "$CURSOR_HOOKS" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+
+  local tmp
+  tmp="$(mktemp)"
+  jq "$_CURSOR_HOOK_JQ_DEDUPE"'
+    if .hooks then .hooks |= with_entries(.value |= dedupe_event) else . end
+  ' "$CURSOR_HOOKS" > "$tmp"
+  if _replace_json_if_changed "$CURSOR_HOOKS" "$tmp" _backup_cursor_hooks_once; then
+    echo "  - collapsed duplicate hook registrations in $CURSOR_HOOKS"
+  fi
 }
 
 # Append rules to ~/.claude/settings.json permissions.<action>, preserving
@@ -296,6 +703,7 @@ install_permission_rules() {
   mkdir -p "$(dirname "$SETTINGS")"
   if [[ ! -f "$SETTINGS" ]]; then
     echo '{}' > "$SETTINGS"
+    SETTINGS_BACKED_UP=1
   fi
 
   local rules_json
@@ -345,6 +753,7 @@ install_teams_env() {
   mkdir -p "$(dirname "$SETTINGS")"
   if [[ ! -f "$SETTINGS" ]]; then
     echo '{}' > "$SETTINGS"
+    SETTINGS_BACKED_UP=1
   fi
 
   local current
@@ -437,7 +846,10 @@ _enable_codex_agents_key() {
   fi
 
   mkdir -p "$(dirname "$CODEX_CONFIG_TOML")"
-  [[ -f "$CODEX_CONFIG_TOML" ]] || : > "$CODEX_CONFIG_TOML"
+  if [[ ! -f "$CODEX_CONFIG_TOML" ]]; then
+    : > "$CODEX_CONFIG_TOML"
+    CODEX_CONFIG_BACKED_UP=1
+  fi
 
   _backup_codex_config_once
 
@@ -507,13 +919,35 @@ install_codex_review_hook() {
   echo "[claude] codex commit review"
 
   if [[ "$enabled" -eq 0 ]]; then
-    remove_hook "codex-commit-review.sh" "PreToolUse"
+    remove_hook "$AGENT_HOME/.claude/hooks/codex-commit-review.sh" "PreToolUse"
     echo "  = hook not requested (--codex-review)"
     return 0
   fi
 
   install_hook "$AGENT_HOME/.claude/hooks/codex-commit-review.sh" "Bash" "PreToolUse"
 
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "  ! 'codex' not on PATH — the hook stays inert until it is installed" >&2
+  fi
+}
+
+# Same switch for Cursor. The hook speaks Cursor's protocol through the
+# cursor-commit-review.sh wrapper and is registered on beforeShellExecution.
+install_cursor_review_hook() {
+  local enabled="$1"
+  echo "[cursor] codex commit review"
+
+  if [[ "$enabled" -eq 0 ]]; then
+    remove_cursor_hook "$AGENT_HOME/.cursor/hooks/cursor-commit-review.sh" "beforeShellExecution"
+    echo "  = hook not requested (--codex-review)"
+    return 0
+  fi
+
+  install_cursor_hook "$AGENT_HOME/.cursor/hooks/cursor-commit-review.sh" "beforeShellExecution"
+
+  if is_windows; then
+    echo "  ! Cursor gives a hook no shell selector; the script needs bash on PATH" >&2
+  fi
   if ! command -v codex >/dev/null 2>&1; then
     echo "  ! 'codex' not on PATH — the hook stays inert until it is installed" >&2
   fi
@@ -537,12 +971,12 @@ install_codex_review_skills() {
   local src
   for src in "$source_root"/*/; do
     [[ -d "$src" ]] || continue
-    unlink_if_repo_owned "$target_root/$(basename "$src")" "${src%/}"
+    remove_installed_tree "$target_root/$(basename "$src")"
   done
   echo "  = skills not requested (--codex-review)"
 }
 
-# Symlink each repo skill from <source_root>/* into <target_root>/<name>.
+# Copy each repo skill from <source_root>/* into <target_root>/<name>.
 install_skills() {
   local source_root="$1"
   local target_root="$2"
@@ -552,7 +986,7 @@ install_skills() {
     [[ -d "$src" ]] || continue
     local name
     name="$(basename "$src")"
-    link "${src%/}" "$target_root/$name"
+    install_tree "${src%/}" "$target_root/$name"
   done
 }
 
@@ -583,37 +1017,6 @@ cleanup_legacy_codex_skills() {
   done
 
   rmdir "$legacy_root" 2>/dev/null || true
-}
-
-# Remove a link at <target> only if it resolves inside <abs_source_root>.
-# Never touches a real file/dir or a link pointing outside the given root.
-unlink_if_repo_owned() {
-  local target="$1"
-  local source_root="$2"
-
-  if is_windows && is_junction "$target"; then
-    if is_same_dir "$target" "$source_root" || _resolves_inside "$target" "$source_root"; then
-      remove_junction "$target"
-      echo "  - removed $target"
-    fi
-    return 0
-  fi
-
-  [[ -L "$target" ]] || return 0
-  local resolved
-  resolved="$(readlink "$target")"
-  case "$resolved" in
-    "$source_root"|"$source_root"/*)
-      rm "$target"
-      echo "  - removed $target"
-      ;;
-  esac
-}
-
-_resolves_inside() {
-  local resolved
-  resolved="$( (cd "$1" 2>/dev/null && pwd -P) )"
-  [[ -n "$resolved" && "$resolved" == "$2"/* ]]
 }
 
 # Inline @<prefix>/<file>.md references in <source_file> by reading the file
@@ -664,6 +1067,53 @@ inline_imports() {
     }
     { print }
   ' "$source_file" > "$output_file"
+}
+
+# Generate one Cursor rule per `- @rules/<name>.md — <description>` entry of
+# <index_file>, reading bodies from <rules_root>/rules/ and writing
+# <out_dir>/<name>.mdc. Cursor ignores plain .md in a rules directory, so the
+# body is republished with frontmatter; `alwaysApply` is what an @-import in
+# CLAUDE.md amounts to for Claude Code.
+build_cursor_rules() {
+  local index_file="$1"
+  local rules_root="$2"
+  local out_dir="$3"
+
+  mkdir -p "$out_dir"
+
+  local entry_re='^- @rules/([A-Za-z0-9_-]+)\.md([[:space:]]+—[[:space:]]+(.*))?$'
+  local line name description body
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $entry_re ]] || continue
+    name="${BASH_REMATCH[1]}"
+    description="${BASH_REMATCH[3]}"
+    body="$rules_root/rules/$name.md"
+    if [[ ! -f "$body" ]]; then
+      echo "install-lib: rule missing: rules/$name.md" >&2
+      exit 1
+    fi
+    write_cursor_rule "$out_dir/$name.mdc" "$description" "$body"
+  done < "$index_file"
+}
+
+# Write a single Cursor rule: frontmatter, then the rule body verbatim. The
+# description is quoted through jq — a JSON string is valid YAML, and rule
+# descriptions carry colons.
+write_cursor_rule() {
+  local out_file="$1"
+  local description="$2"
+  local body_file="$3"
+
+  {
+    printf -- '---\n'
+    if [[ -n "$description" ]]; then
+      printf 'description: '
+      jq -n --arg value "$description" '$value'
+    fi
+    printf 'alwaysApply: true\n'
+    printf -- '---\n\n'
+    cat "$body_file"
+  } > "$out_file"
 }
 
 # Print the orchestration section for <enabled> (0|1), read from
@@ -838,9 +1288,8 @@ register_mcp_claude() {
   mkdir -p "$(dirname "$CLAUDE_CONFIG")"
   if [[ ! -f "$CLAUDE_CONFIG" ]]; then
     echo '{}' > "$CLAUDE_CONFIG"
+    CLAUDE_CONFIG_BACKED_UP=1
   fi
-
-  _backup_claude_config_once
 
   local tmp
   tmp="$(mktemp)"
@@ -855,8 +1304,11 @@ register_mcp_claude() {
         + (if ($env | length) > 0 then {env: $env} else {} end)
       )
   ' "$CLAUDE_CONFIG" > "$tmp"; then
-    mv "$tmp" "$CLAUDE_CONFIG"
-    echo "  + claude MCP $name -> $command"
+    if _replace_json_if_changed "$CLAUDE_CONFIG" "$tmp" _backup_claude_config_once; then
+      echo "  + claude MCP $name -> $command"
+    else
+      echo "  = claude MCP $name -> $command (registered)"
+    fi
   else
     rm -f "$tmp"
     echo "  ! jq update failed for claude MCP $name (config left untouched)" >&2
@@ -882,43 +1334,24 @@ register_mcp_codex() {
   fi
 
   mkdir -p "$(dirname "$CODEX_CONFIG_TOML")"
-  [[ -f "$CODEX_CONFIG_TOML" ]] || : > "$CODEX_CONFIG_TOML"
+  if [[ ! -f "$CODEX_CONFIG_TOML" ]]; then
+    : > "$CODEX_CONFIG_TOML"
+    CODEX_CONFIG_BACKED_UP=1
+  fi
 
-  _backup_codex_config_once
-
-  local target_regex='^\\[mcp_servers\\.'"$name"'(\\.env)?\\][[:space:]]*$'
-  local tmp
-  tmp="$(mktemp)"
-  awk -v target="$target_regex" '
-    BEGIN { skip = 0 }
-    /^\[/ {
-      if (match($0, target)) { skip = 1; next }
-      skip = 0
-    }
-    !skip
-  ' "$CODEX_CONFIG_TOML" > "$tmp"
-
-  # Trim trailing blank lines so we add exactly one separator.
-  awk 'BEGIN { blank = 0 } /^$/ { blank++; next } { for (i=0;i<blank;i++) print ""; blank=0; print } END {}' "$tmp" > "${tmp}.trim"
-  mv "${tmp}.trim" "$tmp"
-
+  local block
+  block="$(mktemp)"
   {
-    if [[ -s "$tmp" ]]; then
-      cat "$tmp"
-      printf '\n'
-    fi
     printf '[mcp_servers.%s]\n' "$name"
     # command line — JSON-quote produces a TOML-safe basic string.
     printf 'command = '
     jq -n --arg v "$command" '$v'
-    # args
     local args_count
     args_count="$(printf '%s' "$args_json" | jq 'length')"
     if [[ "$args_count" -gt 0 ]]; then
       printf 'args = '
       printf '%s\n' "$args_json"
     fi
-    # env block
     local env_keys
     env_keys="$(printf '%s' "$env_json" | jq -r 'keys_unsorted[]?' || true)"
     if [[ -n "$env_keys" ]]; then
@@ -930,11 +1363,94 @@ register_mcp_codex() {
         jq -n --arg v "$val" '$v'
       done <<< "$env_keys"
     fi
-  } > "${tmp}.out"
+  } > "$block"
 
-  mv "${tmp}.out" "$CODEX_CONFIG_TOML"
-  rm -f "$tmp"
-  echo "  + codex MCP $name -> $command"
+  local header_regex='^\[mcp_servers\.'"$name"'(\.env)?\][[:space:]]*$'
+  local tmp
+  tmp="$(mktemp)"
+
+  if grep -Eq "$header_regex" "$CODEX_CONFIG_TOML"; then
+    # Rewrite the block where it already sits: appending it at the end instead
+    # would shuffle it past whatever follows on every run.
+    awk -v target="$header_regex" -v block="$block" '
+      BEGIN { skip = 0; inserted = 0 }
+      /^\[/ {
+        if (match($0, target)) {
+          skip = 1
+          if (!inserted) {
+            while ((getline line < block) > 0) { print line }
+            close(block)
+            inserted = 1
+          }
+          next
+        }
+        skip = 0
+      }
+      !skip
+    ' "$CODEX_CONFIG_TOML" > "$tmp"
+  else
+    # Trim trailing blank lines so exactly one separator is added.
+    awk 'BEGIN { blank = 0 } /^$/ { blank++; next } { for (i=0;i<blank;i++) print ""; blank=0; print }' \
+      "$CODEX_CONFIG_TOML" > "$tmp"
+    {
+      [[ -s "$tmp" ]] && printf '\n'
+      cat "$block"
+    } >> "$tmp"
+  fi
+  rm -f "$block"
+
+  if _replace_if_changed "$CODEX_CONFIG_TOML" "$tmp" _backup_codex_config_once; then
+    echo "  + codex MCP $name -> $command"
+  else
+    echo "  = codex MCP $name -> $command (registered)"
+  fi
+}
+
+# Register an MCP server in ~/.cursor/mcp.json.
+# Args: same shape as register_mcp_claude. Cursor infers the stdio transport
+# from `command`, so no `type` key is written.
+register_mcp_cursor() {
+  local name="$1"
+  local command="$2"
+  local args_json="$3"
+  local env_json="$4"
+  [[ -z "$args_json" ]] && args_json='[]'
+  [[ -z "$env_json"  ]] && env_json='{}'
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  ! jq required to register MCP $name in cursor config" >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$CURSOR_MCP")"
+  if [[ ! -f "$CURSOR_MCP" ]]; then
+    echo '{}' > "$CURSOR_MCP"
+    CURSOR_MCP_BACKED_UP=1
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  if jq --arg name "$name" \
+        --arg command "$command" \
+        --argjson args "$args_json" \
+        --argjson env "$env_json" '
+    .mcpServers //= {}
+    | .mcpServers[$name] = (
+        {command: $command}
+        + (if ($args | length) > 0 then {args: $args} else {} end)
+        + (if ($env | length) > 0 then {env: $env} else {} end)
+      )
+  ' "$CURSOR_MCP" > "$tmp"; then
+    if _replace_json_if_changed "$CURSOR_MCP" "$tmp" _backup_cursor_mcp_once; then
+      echo "  + cursor MCP $name -> $command"
+    else
+      echo "  = cursor MCP $name -> $command (registered)"
+    fi
+  else
+    rm -f "$tmp"
+    echo "  ! jq update failed for cursor MCP $name (config left untouched)" >&2
+    return 1
+  fi
 }
 
 # Build a JSON array of strings from positional args.
@@ -1046,6 +1562,10 @@ register_core_mcp_claude() {
 
 register_core_mcp_codex() {
   _register_core_mcp codex
+}
+
+register_core_mcp_cursor() {
+  _register_core_mcp cursor
 }
 
 _register_core_mcp() {

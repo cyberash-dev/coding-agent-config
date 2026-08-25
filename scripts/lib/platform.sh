@@ -14,8 +14,6 @@
 #   windows_path <path>           — backslash path for a cmd.exe argument
 #   posix_path <path>             — POSIX path for this shell
 #   is_junction <path>
-#   is_same_dir <path> <path>
-#   create_junction <target> <source>
 #   remove_junction <target>
 #
 # Public globals (set on first source):
@@ -77,6 +75,8 @@ posix_path() {
   printf '%s' "$1"
 }
 
+# Installs copy rather than link, so junctions are only ever read and removed
+# here: an install from an older version of this repo may have left one behind.
 is_junction() {
   local path="$1"
   [[ -d "$path" ]] || return 1
@@ -85,17 +85,6 @@ is_junction() {
     return
   fi
   [[ -L "$path" ]]
-}
-
-is_same_dir() {
-  local left right
-  left="$( (cd "$1" 2>/dev/null && pwd -P) )"
-  right="$( (cd "$2" 2>/dev/null && pwd -P) )"
-  [[ -n "$left" && "$left" == "$right" ]]
-}
-
-create_junction() {
-  cmd //c mklink //J "$(windows_path "$1")" "$(windows_path "$2")" >/dev/null
 }
 
 remove_junction() {

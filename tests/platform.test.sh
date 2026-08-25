@@ -39,44 +39,6 @@ test_agent_home_is_an_existing_directory() {
   [[ -d "$(agent_home)" ]]
 }
 
-test_link_creates_a_target_resolving_to_the_source() {
-  sandbox
-
-  link "$TMP_ROOT/source" "$TMP_ROOT/home/rules" >/dev/null
-
-  is_same_dir "$TMP_ROOT/home/rules" "$TMP_ROOT/source"
-}
-
-test_link_reports_an_existing_link_as_unchanged() {
-  sandbox
-  link "$TMP_ROOT/source" "$TMP_ROOT/home/rules" >/dev/null
-
-  local output
-  output="$(link "$TMP_ROOT/source" "$TMP_ROOT/home/rules")"
-
-  assert_contains "$output" "already linked"
-}
-
-test_link_backs_up_a_pre_existing_target() {
-  sandbox
-  printf 'hand written\n' > "$TMP_ROOT/home/rules"
-
-  link "$TMP_ROOT/source" "$TMP_ROOT/home/rules" >/dev/null
-
-  [[ "$(cat "$TMP_ROOT/home/rules.bak.$TS")" == "hand written" ]]
-  is_same_dir "$TMP_ROOT/home/rules" "$TMP_ROOT/source"
-}
-
-test_link_fails_on_a_missing_source() {
-  sandbox
-
-  local output rc=0
-  output="$( (link "$TMP_ROOT/absent" "$TMP_ROOT/home/rules") 2>&1 )" || rc=$?
-
-  [[ "$rc" -ne 0 ]]
-  assert_contains "$output" "source missing"
-}
-
 test_inline_imports_expands_a_known_prefix() {
   sandbox
   mkdir -p "$TMP_ROOT/source/rules"
@@ -122,10 +84,6 @@ run_test() {
 
 run_test test_native_path_round_trips_to_the_same_file
 run_test test_agent_home_is_an_existing_directory
-run_test test_link_creates_a_target_resolving_to_the_source
-run_test test_link_reports_an_existing_link_as_unchanged
-run_test test_link_backs_up_a_pre_existing_target
-run_test test_link_fails_on_a_missing_source
 run_test test_inline_imports_expands_a_known_prefix
 run_test test_inline_imports_leaves_an_unknown_prefix_untouched
 run_test test_mcp_launch_spec_fails_when_the_bin_is_absent
