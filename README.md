@@ -65,7 +65,7 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
   VCS-neutral transport — `scripts/codex_review.py` starts a fresh read-only
   `codex exec` on a supplied scope file and returns the review as JSON against
   `scripts/review-output.schema.json`. `codex-commit-review.sh` runs its review
-  pass through that script, so hook and skills share one review policy.
+  through that script, so hook and skills share one review policy.
 - **`scripts/lib/install-lib.sh`** — shell library exposing the copy,
   hook-registration, permission/env, MCP-registration, rule-generation and
   import-inlining primitives. Sourced by this repo's drivers and intended to be
@@ -242,34 +242,33 @@ inject context at all. The same guidance reaches Cursor as the always-applied
 `code-navigation.mdc` rule instead.
 
 `codex-commit-review.sh` is opt-in on purpose: before every `git commit` /
-`arc commit` it runs `codex` twice — a read-only review pass, then a
-`workspace-write` pass that edits the working copy and re-stages the files that
-were already staged. It never asks for confirmation. It is fail-open (no
-`codex` on PATH, or a failing pass, lets the commit through untouched) and can
-be muted at runtime with `~/.claude/codex-commit-review.disabled` or
-`CODEX_COMMIT_REVIEW_DISABLED=1`.
+`arc commit` it runs a read-only `codex` review of the uncommitted changes and
+refuses the commit so the findings reach the agent, which decides what to act
+on and re-runs the commit. Nothing on disk is touched by the hook. It is
+fail-open (no `codex` on PATH, or a failing review, lets the commit through
+untouched) and can be muted at runtime with
+`~/.claude/codex-commit-review.disabled` or `CODEX_COMMIT_REVIEW_DISABLED=1`.
+
+The hash of the reviewed change is remembered under
+`~/.cache/coding-agent-config/commit-review/`, so the retry is let straight
+through instead of starting another review; a change that moved on since is
+reviewed again.
 
 One script, two hook protocols, selected by `COMMIT_REVIEW_PROTOCOL`:
 
-- **Claude Code** — the commit is allowed and the review plus the fix report
-  ride along in `additionalContext`.
+- **Claude Code** — `permissionDecision: "deny"` with the review in
+  `permissionDecisionReason`.
 - **Cursor** — entered through `cursor-commit-review.sh`, which sets the
-  variable. Cursor delivers a hook message to the agent only on a refusal, so
-  the review comes back as `permission: "deny"` and the agent re-runs the
-  commit. The hash of the reviewed change is remembered under
-  `~/.cache/coding-agent-config/commit-review/`, so that retry is let straight
-  through instead of starting another review; a change that moved on since is
-  reviewed again.
+  variable. `permission: "deny"` with the review in `agent_message`; Cursor
+  delivers a hook message to the agent only on a refusal.
 
-The review pass is the `codex-cli-review` skill: the hook writes the status and
+The review itself is the `codex-cli-review` skill: the hook writes the status and
 the staged plus unstaged diff into a scope file and calls
 `codex-cli-review/scripts/codex_review.py` from the first skill root that has
 it (`~/.claude/skills`, `~/.agents/skills`, `~/.cursor/skills`), which runs the
 review under the `code-review` policy and returns JSON. That is why the flag
 installs skills and hook together — without the skill the hook allows the commit
-and says the review was skipped. The fix pass carries
-`CODE_REVIEW_HOOK_ACTIVE=1`, the guard the script itself honours, so the codex
-applying the fixes cannot start a nested review.
+and says the review was skipped.
 
 With `--sdd`, agent-sdd merges its own hooks into `~/.claude/settings.json`.
 

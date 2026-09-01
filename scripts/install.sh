@@ -28,9 +28,9 @@
 # --codex-review
 #         Install the review bundle from `codex-review/`: the code-review and
 #         codex-cli-review skills, plus the codex-commit-review PreToolUse hook,
-#         which runs every `git commit` / `arc commit` through codex twice — a
-#         review pass driven by the codex-cli-review skill and a workspace-write
-#         pass that edits the files. The skills land on every surface; the hook
+#         which runs every `git commit` / `arc commit` through a read-only codex
+#         review driven by the codex-cli-review skill and refuses the commit so
+#         the findings reach the agent. The skills land on every surface; the hook
 #         is registered for claude (PreToolUse) and cursor (beforeShellExecution),
 #         Codex has no hook configuration to put it in. Without the flag, both
 #         are removed.
@@ -85,8 +85,9 @@ Usage: $0 <claude|codex|cursor|all> [--sdd] [--teams] [--codex-review] [--update
            ~/.codex/config.toml
   --codex-review
            install the code-review and codex-cli-review skills, and register the
-           codex-commit-review PreToolUse hook: every commit is reviewed by
-           codex, which then edits the files (the hook is claude/all only)
+           commit-review hook for claude and cursor: every commit is refused
+           once so the codex review reaches the agent, nothing is edited, and
+           an unchanged retry goes through
   --update-mcps
            update npm-backed MCP packages without prompting per package
 EOF

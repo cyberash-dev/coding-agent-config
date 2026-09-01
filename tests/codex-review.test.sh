@@ -50,8 +50,8 @@ test_review_skills_are_removed_when_not_requested() {
 HOOK_SKILL_SCRIPT_DIR=".claude/skills/codex-cli-review/scripts"
 
 # A git working copy with one staged file, a stub review script where the hook
-# expects the installed codex-cli-review skill, and a codex stand-in for the
-# fix pass that records the environment it was called with.
+# expects the installed codex-cli-review skill, and a codex stand-in that
+# records any call, so a pass writing to the working copy would show up.
 hook_sandbox() {
   sandbox
   mkdir -p "$TMP_ROOT/bin" "$TMP_ROOT/home/$HOOK_SKILL_SCRIPT_DIR" "$TMP_ROOT/repo"
@@ -68,15 +68,21 @@ EOF
 
   cat > "$TMP_ROOT/bin/codex" <<EOF
 #!/usr/bin/env bash
-printf 'CODE_REVIEW_HOOK_ACTIVE=%s\n' "\${CODE_REVIEW_HOOK_ACTIVE:-unset}" >> "$TMP_ROOT/codex-call"
-cat >> "$TMP_ROOT/codex-call"
-printf 'APPLIED: nothing\nSKIPPED: nothing\n'
+printf '%s\n' "\$*" >> "$TMP_ROOT/codex-call"
 EOF
   chmod +x "$TMP_ROOT/bin/codex"
 
   git -C "$TMP_ROOT/repo" init -q
   printf 'def charge():\n    return None\n' > "$TMP_ROOT/repo/service.py"
   git -C "$TMP_ROOT/repo" add service.py
+}
+
+# Index and tracked content of the sandbox repository — what a pass writing to
+# the working copy would move.
+repo_state() {
+  git -C "$TMP_ROOT/repo" status --porcelain
+  git -C "$TMP_ROOT/repo" diff --cached
+  git -C "$TMP_ROOT/repo" diff
 }
 
 run_hook() {
@@ -100,12 +106,53 @@ test_commit_review_reviews_the_staged_diff_through_the_skill_script() {
   assert_contains "$output" "STUB REVIEW"
 }
 
-test_commit_review_keeps_the_fix_pass_from_starting_a_nested_review() {
+test_commit_review_denies_the_commit_and_reports_the_review() {
+  hook_sandbox
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]] \
+    && assert_contains "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason')" "STUB REVIEW"
+}
+
+test_commit_review_lets_the_retry_through() {
+  hook_sandbox
+  run_hook >/dev/null || return 1
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]]
+}
+
+test_commit_review_leaves_the_working_copy_alone() {
+  hook_sandbox
+  local before
+  before="$(repo_state)"
+
+  run_hook >/dev/null || return 1
+
+  [[ "$(repo_state)" == "$before" ]]
+}
+
+test_commit_review_spawns_no_second_codex_pass() {
   hook_sandbox
 
   run_hook >/dev/null || return 1
 
-  assert_contains "$(cat "$TMP_ROOT/codex-call")" "CODE_REVIEW_HOOK_ACTIVE=1"
+  [[ ! -e "$TMP_ROOT/codex-call" ]]
+}
+
+test_commit_review_allows_the_commit_when_the_retry_marker_cannot_be_stored() {
+  hook_sandbox
+  printf 'not a directory\n' > "$TMP_ROOT/home/.cache"
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]] \
+    && assert_contains "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')" "STUB REVIEW"
 }
 
 test_commit_review_allows_the_commit_when_the_review_script_is_absent() {
@@ -210,7 +257,11 @@ run_test test_review_skills_are_copied_when_requested
 run_test test_review_skills_are_removed_when_not_requested
 run_test test_review_skills_keep_a_same_name_skill_owned_by_the_user
 run_test test_commit_review_reviews_the_staged_diff_through_the_skill_script
-run_test test_commit_review_keeps_the_fix_pass_from_starting_a_nested_review
+run_test test_commit_review_denies_the_commit_and_reports_the_review
+run_test test_commit_review_lets_the_retry_through
+run_test test_commit_review_leaves_the_working_copy_alone
+run_test test_commit_review_spawns_no_second_codex_pass
+run_test test_commit_review_allows_the_commit_when_the_retry_marker_cannot_be_stored
 run_test test_commit_review_allows_the_commit_when_the_review_script_is_absent
 run_test test_commit_review_finds_the_skill_installed_for_the_other_harnesses
 run_test test_cursor_commit_review_denies_the_commit_and_reports_the_review

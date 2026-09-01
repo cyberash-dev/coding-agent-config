@@ -909,11 +909,10 @@ _codex_agents_enabled() {
 }
 
 # Register or drop the codex commit-review hook. Symmetric with the driver's
-# --codex-review flag: 1 installs it, 0 removes it. Opt-in because the hook is
-# not a reviewer that merely reports — its second codex pass runs with
-# `-s workspace-write` and edits the working copy before the commit goes
-# through. The hook itself is fail-open and needs `codex` on PATH; without it
-# every commit passes untouched.
+# --codex-review flag: 1 installs it, 0 removes it. Opt-in because it holds up
+# every commit for a codex review and hands the findings back as a refusal, so
+# the agent has to act on them before committing. The hook is fail-open and
+# needs `codex` on PATH; without it every commit passes untouched.
 install_codex_review_hook() {
   local enabled="$1"
   echo "[claude] codex commit review"
