@@ -66,6 +66,32 @@ if home_record is not None:
     return executable
 
 
+def review_output_with_stdin_held_open(
+    scope_file: Path, environment: dict[str, str], timeout: float = 15.0
+) -> str:
+    with subprocess.Popen(
+        (
+            sys.executable,
+            str(REVIEW_SCRIPT),
+            "--cwd",
+            str(scope_file.parent),
+            "--scope-file",
+            str(scope_file),
+        ),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    ) as review:
+        try:
+            review.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            review.kill()
+            raise
+        return review.stdout.read() if review.stdout else ""
+
+
 class ReviewPromptTest(unittest.TestCase):
     def test_prompt_encapsulates_review_contract(self: ReviewPromptTest) -> None:
         scope = "Review only src/payment.py from the supplied diff."
@@ -410,6 +436,42 @@ class ReviewHomeTest(unittest.TestCase):
             codex_home = home_record.read_text(encoding="utf-8")
 
         self.assertEqual(codex_home, str(selected_home))
+
+class ReviewStdinTest(unittest.TestCase):
+    def test_review_does_not_wait_on_the_caller_stdin(self: ReviewStdinTest) -> None:
+        """`codex exec` reads a piped stdin to EOF and appends it to the prompt.
+
+        A caller that holds its own stdin open would hang the review for the
+        whole of its timeout and pay for nothing.
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            scope_file = directory / "scope.md"
+            scope_file.write_text("Review src/payment.py.", encoding="utf-8")
+            executable = directory / "codex"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "sys.stdin.read()\n"
+                'pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(\n'
+                '    \'{"findings": [], "summary": "s", "residual_risks": [], "tests_not_run": []}\',\n'
+                '    encoding="utf-8",\n'
+                ")\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            # The guard would return before the child ever starts, and the test
+            # would pass on unfixed code.
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key != "CODE_REVIEW_HOOK_ACTIVE"
+            }
+            environment["PATH"] = f"{directory}:{os.environ['PATH']}"
+
+            emitted = review_output_with_stdin_held_open(scope_file, environment)
+
+        self.assertEqual(json.loads(emitted)["summary"], "s")
 
 class HookRecursionTest(unittest.TestCase):
     def test_active_hook_skips_nested_review(self: HookRecursionTest) -> None:

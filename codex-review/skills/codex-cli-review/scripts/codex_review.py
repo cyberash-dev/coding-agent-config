@@ -153,6 +153,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
             capture_output=True,
             text=True,
             env=environment,
+            # `codex exec` reads a piped stdin to EOF and appends it to the
+            # prompt, so an open one from the caller hangs the review for the
+            # whole of its timeout.
+            stdin=subprocess.DEVNULL,
         )
         if completed.returncode != 0:
             print(completed.stderr.strip() or "Codex CLI review failed.", file=sys.stderr)
