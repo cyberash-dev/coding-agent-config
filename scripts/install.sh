@@ -34,9 +34,9 @@
 #         is registered for claude (PreToolUse) and cursor (beforeShellExecution),
 #         Codex has no hook configuration to put it in. It also writes the review
 #         its own CODEX_HOME under ~/.cache/coding-agent-config/codex-review-home:
-#         the review-scoped rules, medium reasoning, no MCP servers and no
-#         plugins, with the login shared from the operator's codex home. Without
-#         the flag, all three are removed.
+#         the review-scoped rules, no MCP servers and no plugins, with the login
+#         shared from the operator's codex home. Without the flag, all three are
+#         removed.
 #
 # --update-mcps
 #         Update already installed npm-backed MCP packages to npm latest

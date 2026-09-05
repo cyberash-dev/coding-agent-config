@@ -296,8 +296,9 @@ Both factors are held down deliberately.
 `~/.cache/coding-agent-config/codex-review-home/`, and `codex_review.py` points
 the child at it. The operator's own codex home carries MCP servers, plugins, an
 interactive model and the full rule set; this one carries the review-scoped
-rules from `templates/review/rules.md`, `model_reasoning_effort = "medium"`,
-`web_search = false` and `multi_agent = false`. Login is a symlink to
+rules from `templates/review/rules.md`, `model_reasoning_effort = "high"`,
+`web_search = false` and `multi_agent = false`. Depth is the one thing a review
+is not trimmed on: a pass at medium missed a finding the deeper one made. Login is a symlink to
 `${CODEX_HOME:-~/.codex}/auth.json`, so the review signs in as the operator and
 follows a token refresh. An operator whose OAuth tokens live in the OS keyring
 has no `auth.json` to share, and a `CODEX_HOME` switched since the install
