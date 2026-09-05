@@ -308,6 +308,10 @@ cheaper model that needs more of them to reach the same finding is not cheaper.
 `CODEX_REVIEW_MODEL` pins one per machine where the account says otherwise. The
 generated file itself is rewritten on every install.
 
+The review policy pulls its weight too: `code-review/SKILL.md` treats the rules
+already in context as loaded, so the child no longer walks the tree above the
+review root re-reading the same rule files it was started with.
+
 ### MCP servers
 
 The install also registers MCP servers referenced by the rules into

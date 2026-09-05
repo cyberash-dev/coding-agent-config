@@ -128,7 +128,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     rules = (
         rules_file.read_text(encoding="utf-8")
         if rules_file is not None
-        else "Load and apply all applicable rules from the current context and target tree."
+        else "Apply the rules already loaded in this context, plus any the review root itself carries."
     )
     prompt = review_prompt(scope, rules)
     schema_path = Path(__file__).with_name("review-output.schema.json")

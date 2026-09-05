@@ -22,8 +22,8 @@ Use the scope provided by the user, review surface, or adapter. If no scope is a
 
 ## Applicable Rules
 
-1. Collect relevant instructions already present in the current context.
-2. Load applicable target-tree instructions such as `AGENTS.md`, `CLAUDE.md`, or their documented equivalent.
+1. Collect relevant instructions already present in the current context. They are the rule set; treat them as loaded, and do not go looking for the same rules in the tree under review.
+2. Read the instruction files (`AGENTS.md`, `CLAUDE.md`, or their documented equivalent) that cover a changed file, at or below the review root, unless the current context already carries them. Never walk above the review root.
 3. Apply explicit user criteria plus relevant language, architecture, testing, security, naming, error-handling, and project best-practice rules.
 4. Resolve conflicts according to instruction priority. Among compatible rules at the same priority, apply the most specific rule covering the changed file.
 5. Keep the rule set scoped to the reviewed code. Do not invent, weaken, or silently omit requirements.
