@@ -26,6 +26,7 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 │   └── skills/         #   code-review (policy) + codex-cli-review (CLI transport)
 ├── templates/          # generation fragments (never copied into agents as-is)
 │   ├── language/       #   reply-language directive, selected by --lang
+│   ├── review/         #   rule index the commit review runs against
 │   └── teams/          #   orchestration section, selected by --teams
 ├── build/              # generated, gitignored
 │   ├── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
@@ -66,6 +67,12 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
   `codex exec` on a supplied scope file and returns the review as JSON against
   `scripts/review-output.schema.json`. `codex-commit-review.sh` runs its review
   through that script, so hook and skills share one review policy.
+- **`templates/review/rules.md`** — the rule index the review is generated
+  from. `install.sh --codex-review` inlines it into the review's own
+  `AGENTS.md` (see [Review cost](#review-cost)). Process, navigation,
+  orchestration and output-style rules are left out: a read-only reviewer drives
+  no workflow and talks to no operator, and every rule it carries is re-sent on
+  each turn of the review.
 - **`scripts/lib/install-lib.sh`** — shell library exposing the copy,
   hook-registration, permission/env, MCP-registration, rule-generation and
   import-inlining primitives. Sourced by this repo's drivers and intended to be
@@ -156,7 +163,7 @@ cd ~/Projects/coding-agent-config
 | `--lang=ru\|en` | pin the agent's reply language. Omitted, the agent replies in the operator's own language; set, it always replies in Russian or English. |
 | `--sdd` | install the `agent-sdd` npm package globally, then run `sdd install <mode>`. agent-sdd installs its own rules, skill, and hooks. |
 | `--teams` | delegation-first setup: adds `rules/orchestration.md` to the generated `CLAUDE.md` / `AGENTS.md` and to the Cursor rule set, sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (omitted, the key is removed), and turns both Codex gates on in `~/.codex/config.toml` — `features.multi_agent` and `agents.enabled` (omitted, the config is left as-is). Cursor has no runtime gate to flip, so there it is the rule alone. See [Orchestration](#orchestration). |
-| `--codex-review` | install the `codex-review/` skills on every surface and register the commit-review hook for Claude Code (`PreToolUse`) and Cursor (`beforeShellExecution`); Codex has no hook configuration to put it in. Omitted, both are removed. |
+| `--codex-review` | install the `codex-review/` skills on every surface, write the trimmed `CODEX_HOME` the review runs in, and register the commit-review hook for Claude Code (`PreToolUse`) and Cursor (`beforeShellExecution`); Codex has no hook configuration to put it in. Omitted, all three are removed. See [Review cost](#review-cost). |
 | `--update-mcps` | update npm-backed MCP packages to `latest` without asking per package. |
 
 ### Targets
@@ -179,6 +186,7 @@ Windows.
 | Cursor | `$AGENT_HOME/.cursor/hooks.json` (mutated)  | `beforeShellExecution` entry with `--codex-review` |
 | Cursor | `$AGENT_HOME/.cursor/mcp.json` (mutated)    | `mcpServers.<name>`                   |
 | Cursor | `$AGENT_HOME/.agents/skills/<name>` (copied per skill) | shared with the Codex target above |
+| Codex CLI (review only) | `$AGENT_HOME/.cache/coding-agent-config/codex-review-home/` (generated) | `templates/review/rules.md` + `rules/`, with `--codex-review` |
 
 Codex reads `AGENTS.override.md` in preference to `AGENTS.md` at every level.
 If one exists in the Codex home the install would look successful while nothing
@@ -271,6 +279,34 @@ installs skills and hook together — without the skill the hook allows the comm
 and says the review was skipped.
 
 With `--sdd`, agent-sdd merges its own hooks into `~/.claude/settings.json`.
+
+### Review cost
+
+A review is a full agentic pass: the child re-sends its whole context on every
+turn, so what the review costs is (turns × context), not the size of the diff.
+Both factors are held down deliberately.
+
+**Its own `CODEX_HOME`.** `--codex-review` generates
+`~/.cache/coding-agent-config/codex-review-home/`, and `codex_review.py` points
+the child at it. The operator's own codex home carries MCP servers, plugins, an
+interactive model and the full rule set; this one carries the review-scoped
+rules from `templates/review/rules.md`, `model_reasoning_effort = "medium"`,
+`web_search = false` and `multi_agent = false`. Login is a symlink to
+`${CODEX_HOME:-~/.codex}/auth.json`, so the review signs in as the operator and
+follows a token refresh. An operator whose OAuth tokens live in the OS keyring
+has no `auth.json` to share, and a `CODEX_HOME` switched since the install
+points that link at another account. In both cases the review falls back to the
+operator's own home: the expensive review that works, signed in as the account
+the caller selected, beats the cheap one that cannot. For the same reason the
+home is not written at all when the operator's `config.toml` selects a model
+provider, which the generated config cannot stand in for. Measured on this repo, the per-turn baseline drops from
+~25k tokens to ~15k, and one review of the same 15KB scope from 583,735 input
+tokens over 23 tool calls to 66,233 over 3.
+
+The model is left to codex's own default: what a review costs is turns, and a
+cheaper model that needs more of them to reach the same finding is not cheaper.
+`CODEX_REVIEW_MODEL` pins one per machine where the account says otherwise. The
+generated file itself is rewritten on every install.
 
 ### MCP servers
 

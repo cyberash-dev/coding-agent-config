@@ -243,6 +243,60 @@ test_cursor_commit_review_allows_the_commit_when_the_review_script_is_absent() {
     && [[ ! -e "$TMP_ROOT/codex-call" ]]
 }
 
+test_review_home_carries_only_the_review_scoped_rules() {
+  sandbox
+
+  install_codex_review_home 1 "$ROOT" "$TMP_ROOT/review-home" "$TMP_ROOT/codex" >/dev/null
+
+  local instructions
+  instructions="$(cat "$TMP_ROOT/review-home/AGENTS.md")"
+  assert_contains "$instructions" "Naming Conventions" || return 1
+  assert_contains "$instructions" "Self-Review Checklist" || return 1
+  ! assert_contains "$instructions" "Development Workflow" || return 1
+  ! assert_contains "$instructions" "Delegation is a default execution mode"
+}
+
+test_review_home_drops_the_interactive_extras() {
+  sandbox
+
+  install_codex_review_home 1 "$ROOT" "$TMP_ROOT/review-home" "$TMP_ROOT/codex" >/dev/null
+
+  local config
+  config="$(cat "$TMP_ROOT/review-home/config.toml")"
+  assert_contains "$config" "web_search = false" || return 1
+  assert_contains "$config" "model_reasoning_effort" || return 1
+  ! assert_contains "$config" "mcp_servers"
+}
+
+test_review_home_shares_the_operator_login() {
+  sandbox
+
+  install_codex_review_home 1 "$ROOT" "$TMP_ROOT/review-home" "$TMP_ROOT/codex" >/dev/null
+
+  [[ -L "$TMP_ROOT/review-home/auth.json" ]] \
+    && [[ "$(readlink "$TMP_ROOT/review-home/auth.json")" == "$TMP_ROOT/codex/auth.json" ]]
+}
+
+test_review_home_is_skipped_when_the_operator_selects_a_provider() {
+  sandbox
+  mkdir -p "$TMP_ROOT/codex"
+  install_codex_review_home 1 "$ROOT" "$TMP_ROOT/review-home" "$TMP_ROOT/codex" >/dev/null
+  printf 'model_provider = "azure"\n' > "$TMP_ROOT/codex/config.toml"
+
+  install_codex_review_home 1 "$ROOT" "$TMP_ROOT/review-home" "$TMP_ROOT/codex" >/dev/null
+
+  [[ ! -e "$TMP_ROOT/review-home" ]]
+}
+
+test_review_home_is_removed_when_not_requested() {
+  sandbox
+  install_codex_review_home 1 "$ROOT" "$TMP_ROOT/review-home" "$TMP_ROOT/codex" >/dev/null
+
+  install_codex_review_home 0 "$ROOT" "$TMP_ROOT/review-home" "$TMP_ROOT/codex" >/dev/null
+
+  [[ ! -e "$TMP_ROOT/review-home" ]]
+}
+
 run_test() {
   local name="$1"
   if "$name"; then
@@ -253,6 +307,11 @@ run_test() {
   fi
 }
 
+run_test test_review_home_carries_only_the_review_scoped_rules
+run_test test_review_home_drops_the_interactive_extras
+run_test test_review_home_shares_the_operator_login
+run_test test_review_home_is_skipped_when_the_operator_selects_a_provider
+run_test test_review_home_is_removed_when_not_requested
 run_test test_review_skills_are_copied_when_requested
 run_test test_review_skills_are_removed_when_not_requested
 run_test test_review_skills_keep_a_same_name_skill_owned_by_the_user

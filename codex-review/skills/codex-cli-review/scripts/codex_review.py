@@ -28,15 +28,42 @@ Do not edit files or expand the requested scope.
 Return the review in the required output schema."""
 
 
+def operator_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def review_home() -> Path | None:
+    """The trimmed CODEX_HOME `install.sh --codex-review` prepares, when present.
+
+    The operator's own home carries MCP servers, plugins, an interactive model
+    and the full rule set, and a review re-sends all of it on every turn.
+    """
+    home = Path.home() / ".cache" / "coding-agent-config" / "codex-review-home"
+    if not (home / "config.toml").is_file():
+        return None
+    # The login is shared as a symlink to the operator's auth.json, and it has
+    # to be the login the caller selected: an operator whose OAuth tokens live
+    # in the OS keyring has none to share, and a CODEX_HOME switched since the
+    # install points the same link at another account.
+    login = home / "auth.json"
+    operator_login = operator_home() / "auth.json"
+    if not login.exists() or login.resolve() != operator_login.resolve():
+        return None
+    return home
+
+
 def codex_command(
     cwd: Path,
     schema_path: Path,
     output_path: Path,
     prompt: str,
+    model: str | None,
 ) -> tuple[str, ...]:
+    model_selection = ("-m", model) if model else ()
     return (
         "codex",
         "exec",
+        *model_selection,
         "-C",
         str(cwd),
         "--skip-git-repo-check",
@@ -108,9 +135,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="codex-review-") as temporary_directory:
         output_path = Path(temporary_directory) / "review.json"
-        command = codex_command(cwd.resolve(), schema_path, output_path, prompt)
+        command = codex_command(
+            cwd.resolve(),
+            schema_path,
+            output_path,
+            prompt,
+            os.environ.get("CODEX_REVIEW_MODEL"),
+        )
         environment = os.environ.copy()
         environment["CODE_REVIEW_HOOK_ACTIVE"] = "1"
+        home = review_home()
+        if home is not None:
+            environment["CODEX_HOME"] = str(home)
         completed = subprocess.run(
             command,
             check=False,

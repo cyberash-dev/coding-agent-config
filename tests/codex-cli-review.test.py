@@ -39,21 +39,27 @@ class ReviewDocument(TypedDict):
     tests_not_run: list[str]
 
 
-def fake_codex(directory: Path, review: ReviewDocument) -> Path:
-    return fake_codex_output(directory, json.dumps(review))
+def fake_codex(
+    directory: Path, review: ReviewDocument, home_record: Path | None = None
+) -> Path:
+    return fake_codex_output(directory, json.dumps(review), home_record)
 
 
-def fake_codex_output(directory: Path, output: str) -> Path:
+def fake_codex_output(directory: Path, output: str, home_record: Path | None = None) -> Path:
     executable = directory / "codex"
     executable.write_text(
         """#!/usr/bin/env python3
+import os
 import pathlib
 import sys
 
 output_path = pathlib.Path(sys.argv[sys.argv.index("-o") + 1])
 output_path.write_text(%r, encoding="utf-8")
+home_record = %r
+if home_record is not None:
+    pathlib.Path(home_record).write_text(os.environ.get("CODEX_HOME", ""), encoding="utf-8")
 """
-        % output,
+        % (output, None if home_record is None else str(home_record)),
         encoding="utf-8",
     )
     executable.chmod(0o755)
@@ -90,7 +96,7 @@ class CodexCommandTest(unittest.TestCase):
         schema_path = Path("/plugin/scripts/review-output.schema.json")
         output_path = Path("/tmp/review.json")
 
-        command = codex_command(cwd, schema_path, output_path, "Review this scope")
+        command = codex_command(cwd, schema_path, output_path, "Review this scope", None)
 
         self.assertEqual(
             command,
@@ -114,6 +120,17 @@ class CodexCommandTest(unittest.TestCase):
                 "Review this scope",
             ),
         )
+
+    def test_command_pins_the_review_model(self: CodexCommandTest) -> None:
+        command = codex_command(
+            Path("/workspace/project"),
+            Path("/plugin/scripts/review-output.schema.json"),
+            Path("/tmp/review.json"),
+            "Review this scope",
+            "gpt-5.6-luna",
+        )
+
+        self.assertEqual(command[:4], ("codex", "exec", "-m", "gpt-5.6-luna"))
 
 
 class ReviewExecutionTest(unittest.TestCase):
@@ -250,6 +267,149 @@ class ReviewProtocolTest(unittest.TestCase):
             (3, "Codex returned invalid review JSON."),
         )
 
+
+class ReviewHomeTest(unittest.TestCase):
+    def review_home_of(self: ReviewHomeTest, agent_home: Path) -> Path:
+        return agent_home / ".cache" / "coding-agent-config" / "codex-review-home"
+
+    def test_review_runs_in_the_prepared_review_home(self: ReviewHomeTest) -> None:
+        review: ReviewDocument = {
+            "findings": [],
+            "summary": "No findings.",
+            "residual_risks": [],
+            "tests_not_run": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            agent_home = directory / "home"
+            operator_home = agent_home / ".codex"
+            operator_home.mkdir(parents=True)
+            (operator_home / "auth.json").write_text("{}", encoding="utf-8")
+            prepared_home = self.review_home_of(agent_home)
+            prepared_home.mkdir(parents=True)
+            (prepared_home / "config.toml").write_text('model = "x"', encoding="utf-8")
+            (prepared_home / "auth.json").symlink_to(operator_home / "auth.json")
+            scope_file = directory / "scope.md"
+            scope_file.write_text("Review src/payment.py.", encoding="utf-8")
+            home_record = directory / "codex-home"
+            fake_codex(directory, review, home_record)
+            environment = {
+                "HOME": str(agent_home),
+                "CODEX_HOME": str(operator_home),
+                "PATH": f"{directory}:{os.environ['PATH']}",
+            }
+
+            with patch.dict(os.environ, environment), contextlib.redirect_stdout(io.StringIO()):
+                main(("--cwd", str(directory), "--scope-file", str(scope_file)))
+            codex_home = home_record.read_text(encoding="utf-8")
+
+        self.assertEqual(codex_home, str(prepared_home))
+
+    def test_review_keeps_the_operator_home_when_none_is_prepared(self: ReviewHomeTest) -> None:
+        review: ReviewDocument = {
+            "findings": [],
+            "summary": "No findings.",
+            "residual_risks": [],
+            "tests_not_run": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            agent_home = directory / "home"
+            agent_home.mkdir()
+            scope_file = directory / "scope.md"
+            scope_file.write_text("Review src/payment.py.", encoding="utf-8")
+            home_record = directory / "codex-home"
+            fake_codex(directory, review, home_record)
+            environment = {
+                "HOME": str(agent_home),
+                "CODEX_HOME": str(directory / "operator-codex"),
+                "PATH": f"{directory}:{os.environ['PATH']}",
+            }
+
+            with patch.dict(os.environ, environment), contextlib.redirect_stdout(io.StringIO()):
+                main(("--cwd", str(directory), "--scope-file", str(scope_file)))
+            codex_home = home_record.read_text(encoding="utf-8")
+            operator_home = str(directory / "operator-codex")
+
+        self.assertEqual(codex_home, operator_home)
+
+    def test_review_keeps_the_operator_home_when_the_login_is_not_shared(
+        self: ReviewHomeTest,
+    ) -> None:
+        """An operator whose OAuth tokens live in the OS keyring has no
+        auth.json to share, and the trimmed home would carry no credentials at
+        all. The expensive home that works beats the cheap one that cannot
+        sign in.
+        """
+        review: ReviewDocument = {
+            "findings": [],
+            "summary": "No findings.",
+            "residual_risks": [],
+            "tests_not_run": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            agent_home = directory / "home"
+            prepared_home = self.review_home_of(agent_home)
+            prepared_home.mkdir(parents=True)
+            (prepared_home / "config.toml").write_text('model = "x"', encoding="utf-8")
+            scope_file = directory / "scope.md"
+            scope_file.write_text("Review src/payment.py.", encoding="utf-8")
+            home_record = directory / "codex-home"
+            fake_codex(directory, review, home_record)
+            environment = {
+                "HOME": str(agent_home),
+                "CODEX_HOME": str(directory / "operator-codex"),
+                "PATH": f"{directory}:{os.environ['PATH']}",
+            }
+
+            with patch.dict(os.environ, environment), contextlib.redirect_stdout(io.StringIO()):
+                main(("--cwd", str(directory), "--scope-file", str(scope_file)))
+            codex_home = home_record.read_text(encoding="utf-8")
+            operator_home = str(directory / "operator-codex")
+
+        self.assertEqual(codex_home, operator_home)
+    def test_review_keeps_a_codex_home_the_shared_login_does_not_belong_to(
+        self: ReviewHomeTest,
+    ) -> None:
+        """The prepared login points at the home the install ran against. A
+        CODEX_HOME switched since then selects another account, and the review
+        has to follow the caller rather than sign in as the installer.
+        """
+        review: ReviewDocument = {
+            "findings": [],
+            "summary": "No findings.",
+            "residual_risks": [],
+            "tests_not_run": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            agent_home = directory / "home"
+            installed_home = directory / "codex-installed"
+            installed_home.mkdir(parents=True)
+            (installed_home / "auth.json").write_text("{}", encoding="utf-8")
+            selected_home = directory / "codex-selected"
+            selected_home.mkdir(parents=True)
+            (selected_home / "auth.json").write_text("{}", encoding="utf-8")
+            prepared_home = self.review_home_of(agent_home)
+            prepared_home.mkdir(parents=True)
+            (prepared_home / "config.toml").write_text('model = "x"', encoding="utf-8")
+            (prepared_home / "auth.json").symlink_to(installed_home / "auth.json")
+            scope_file = directory / "scope.md"
+            scope_file.write_text("Review src/payment.py.", encoding="utf-8")
+            home_record = directory / "codex-home"
+            fake_codex(directory, review, home_record)
+            environment = {
+                "HOME": str(agent_home),
+                "CODEX_HOME": str(selected_home),
+                "PATH": f"{directory}:{os.environ['PATH']}",
+            }
+
+            with patch.dict(os.environ, environment), contextlib.redirect_stdout(io.StringIO()):
+                main(("--cwd", str(directory), "--scope-file", str(scope_file)))
+            codex_home = home_record.read_text(encoding="utf-8")
+
+        self.assertEqual(codex_home, str(selected_home))
 
 class HookRecursionTest(unittest.TestCase):
     def test_active_hook_skips_nested_review(self: HookRecursionTest) -> None:

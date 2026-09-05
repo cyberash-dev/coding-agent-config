@@ -32,8 +32,11 @@
 #         review driven by the codex-cli-review skill and refuses the commit so
 #         the findings reach the agent. The skills land on every surface; the hook
 #         is registered for claude (PreToolUse) and cursor (beforeShellExecution),
-#         Codex has no hook configuration to put it in. Without the flag, both
-#         are removed.
+#         Codex has no hook configuration to put it in. It also writes the review
+#         its own CODEX_HOME under ~/.cache/coding-agent-config/codex-review-home:
+#         the review-scoped rules, medium reasoning, no MCP servers and no
+#         plugins, with the login shared from the operator's codex home. Without
+#         the flag, all three are removed.
 #
 # --update-mcps
 #         Update already installed npm-backed MCP packages to npm latest
@@ -84,10 +87,10 @@ Usage: $0 <claude|codex|cursor|all> [--sdd] [--teams] [--codex-review] [--update
            ~/.claude/settings.json, features.multi_agent + agents.enabled in
            ~/.codex/config.toml
   --codex-review
-           install the code-review and codex-cli-review skills, and register the
-           commit-review hook for claude and cursor: every commit is refused
-           once so the codex review reaches the agent, nothing is edited, and
-           an unchanged retry goes through
+           install the code-review and codex-cli-review skills, the trimmed
+           CODEX_HOME the review runs in, and the commit-review hook for claude
+           and cursor: every commit is refused once so the codex review reaches
+           the agent, nothing is edited, and the retry goes through
   --update-mcps
            update npm-backed MCP packages without prompting per package
 EOF
@@ -230,6 +233,11 @@ case "$MODE" in
   cursor) install_cursor ;;
   all)    install_claude; install_codex; install_cursor ;;
 esac
+
+# One review home per user: every surface runs its review through the same
+# codex-cli-review script, and the script reads it from a fixed path.
+install_codex_review_home "$CODEX_REVIEW" "$REPO_ROOT" \
+  "$AGENT_HOME/.cache/coding-agent-config/codex-review-home" "$CODEX_CONFIG_DIR"
 
 # agent-sdd writes its own rules/skill/hooks into the target config(s); run it
 # last so the build steps finish before agent-sdd appends to the installed
