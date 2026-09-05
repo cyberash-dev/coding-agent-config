@@ -630,6 +630,41 @@ EOF
   [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
 }
 
+test_commit_review_reviews_again_after_an_untracked_file_is_edited() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" reset -q
+  rm -f "$TMP_ROOT/repo/service.py"
+  write_functions "$TMP_ROOT/repo/untracked.py" 12 charge
+  run_hook CODEX_REVIEW_COOLDOWN=0 >/dev/null || return 1
+  # Same name, same length, same status: only the content moved.
+  sed -i.bak 's/def charge_1()/def rebate_1()/' "$TMP_ROOT/repo/untracked.py"
+  rm -f "$TMP_ROOT/repo/untracked.py.bak"
+
+  local output
+  output="$(run_hook CODEX_REVIEW_COOLDOWN=0)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
+}
+
+test_commit_review_reviews_again_when_a_line_moves_between_untracked_files() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" reset -q
+  rm -f "$TMP_ROOT/repo/service.py"
+  write_functions "$TMP_ROOT/repo/a.py" 12 charge
+  printf 'b.py\n' >> "$TMP_ROOT/repo/a.py"
+  printf 'y\n' > "$TMP_ROOT/repo/b.py"
+  run_hook CODEX_REVIEW_COOLDOWN=0 >/dev/null || return 1
+  # The same bytes, moved across the boundary between the two files.
+  sed -i.bak '$d' "$TMP_ROOT/repo/a.py"
+  rm -f "$TMP_ROOT/repo/a.py.bak"
+  printf 'b.py\ny\n' > "$TMP_ROOT/repo/b.py"
+
+  local output
+  output="$(run_hook CODEX_REVIEW_COOLDOWN=0)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
+}
+
 run_test() {
   local name="$1"
   if "$name"; then
@@ -662,6 +697,8 @@ run_test test_commit_review_reviews_documentation_when_the_path_gate_is_empty
 run_test test_commit_review_skips_a_change_below_the_line_floor
 run_test test_commit_review_counts_a_new_untracked_directory_against_the_line_floor
 run_test test_commit_review_reviews_again_after_an_edit_past_the_scope_cap
+run_test test_commit_review_reviews_again_after_an_untracked_file_is_edited
+run_test test_commit_review_reviews_again_when_a_line_moves_between_untracked_files
 run_test test_commit_review_truncates_a_scope_over_the_cap
 run_test test_commit_review_keeps_a_truncated_scope_readable_as_utf8
 run_test test_commit_review_counts_an_untracked_path_with_a_space

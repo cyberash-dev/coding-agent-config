@@ -426,7 +426,20 @@ STATE_FILE="$(state_path "$vcs_root")"
 # Fingerprint the change itself, not the scope the reviewer was handed: a
 # truncated scope hashes the same after an edit past the cut, and the retry
 # would be waved through as already reviewed.
-change_hash="$( { printf '%s' "$status_text"; cat "$diff_file"; } | text_hash )"
+# Untracked files appear in the status by name and in no diff at all, so their
+# content has to reach the fingerprint on its own: an edit inside a new file
+# leaves the status identical and would read as the change already reviewed.
+# One digest per file, because concatenated contents let a line moved across
+# the boundary between two files serialise to the very same bytes.
+untracked_digests() {
+  local path
+  while IFS= read -r path; do
+    [[ -f "$vcs_root/$path" ]] || continue
+    printf '%s %s\n' "$path" "$(text_hash < "$vcs_root/$path")"
+  done < <(untracked_files)
+}
+
+change_hash="$( { printf '%s' "$status_text"; cat "$diff_file"; untracked_digests; } | text_hash )"
 if [[ -f "$STATE_FILE" ]]; then
   read -r reviewed_hash reviewed_at reviewed_head < "$STATE_FILE"
   # A marker speaks for the revision it was written against and no other: on a
