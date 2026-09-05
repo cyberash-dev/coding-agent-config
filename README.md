@@ -257,10 +257,16 @@ fail-open (no `codex` on PATH, or a failing review, lets the commit through
 untouched) and can be muted at runtime with
 `~/.claude/codex-commit-review.disabled` or `CODEX_COMMIT_REVIEW_DISABLED=1`.
 
-The hash of the reviewed change is remembered under
-`~/.cache/coding-agent-config/commit-review/`, so the retry is let straight
-through instead of starting another review; a change that moved on since is
-reviewed again.
+The fingerprint of the reviewed change and the time it was delivered are
+remembered under `~/.cache/coding-agent-config/commit-review/`, so the retry is
+let straight through instead of starting another review. That covers both
+retries: the unchanged one, and the one carrying the fixes the review just
+asked for. A change that moved on inside `CODEX_REVIEW_COOLDOWN` (900s) moved
+on because the findings reached the agent, and reviewing the fix is the next
+commit's job. Once a commit lands, or the window closes on a change that has
+moved on since, the next commit is reviewed again: the marker carries the
+revision it belongs to, and only an unchanged retry passes on its fingerprint
+alone.
 
 One script, two hook protocols, selected by `COMMIT_REVIEW_PROTOCOL`:
 
@@ -315,6 +321,10 @@ untracked files count their own length and a rename or delete clears the floor
 outright, since no diff covers either). A diff over `CODEX_REVIEW_MAX_SCOPE_BYTES` (200000) is
 truncated, with the cut declared in the scope. Set a list to empty or a floor to
 0 to switch that gate off.
+
+**One review per commit.** See `CODEX_REVIEW_COOLDOWN` above: the deny/retry
+protocol used to buy a second full review every time the agent acted on the
+findings.
 
 The review policy pulls its weight too: `code-review/SKILL.md` treats the rules
 already in context as loaded, so the child no longer walks the tree above the

@@ -9,9 +9,11 @@
 # Both harnesses refuse the commit and hand the review over as the reason: the
 # findings have to reach the agent before the commit exists, and under Cursor a
 # hook message reaches the agent only on a refusal anyway. The agent acts on the
-# findings and re-runs the commit; the scope hash of the reviewed change is
-# remembered, so a retry on an unchanged scope is let through instead of
-# starting another review.
+# findings and re-runs the commit; the fingerprint of the reviewed change and
+# the time it was delivered are remembered, so the retry is let through instead
+# of starting another review — the unchanged retry by fingerprint, and the retry
+# carrying the fixes the review just asked for by CODEX_REVIEW_COOLDOWN. One
+# commit, one review.
 #
 # What a review costs is (turns × context), and the child re-sends its context on
 # every turn, so the change has to be worth a pass at all: a diff of nothing but
@@ -199,6 +201,11 @@ CODEX_REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-600}"
 CODEX_REVIEW_SKIP_PATHS="${CODEX_REVIEW_SKIP_PATHS-*.md *.rst *.adoc *.lock package-lock.json pnpm-lock.yaml go.sum LICENSE NOTICE}"
 CODEX_REVIEW_MIN_LINES="${CODEX_REVIEW_MIN_LINES:-10}"
 CODEX_REVIEW_MAX_SCOPE_BYTES="${CODEX_REVIEW_MAX_SCOPE_BYTES:-200000}"
+# How long a delivered review keeps covering this working copy. The refusal
+# protocol makes the agent fix what it agrees with and commit again, and that
+# retry carries a different change; without a window every fix would pay for a
+# second full review of the same commit.
+CODEX_REVIEW_COOLDOWN="${CODEX_REVIEW_COOLDOWN:-900}"
 run_with_timeout() {
   local out_file="$1" err_file="$2"
   shift 2
@@ -231,6 +238,20 @@ else
   [[ -z "$vcs_root" ]] && allow "arc commit: working copy not found; review skipped." \
     "arc commit, but no arc working copy was found from $target_dir. No review ran, the commit goes through as is."
 fi
+
+# The revision the marker belongs to: once a commit lands, the window a review
+# opened is over, and the next change is a change nobody has reviewed.
+head_revision() {
+  # --verify, so a repository without a commit yields nothing rather than the
+  # literal "HEAD" that plain rev-parse prints before it fails.
+  ( cd "$vcs_root" && "$vcs" rev-parse --verify HEAD 2>/dev/null ) || printf 'none'
+}
+
+# The revision everything below is about, read before the change is collected
+# rather than after the review returns minutes later. A commit landing in
+# between leaves the marker on the older revision, which costs a review rather
+# than skipping one.
+reviewed_revision="$(head_revision)"
 
 # Nothing uncommitted — no review to run, and no commit to hold up.
 # With `color.ui = always` a status code arrives behind an escape sequence and
@@ -406,10 +427,24 @@ STATE_FILE="$(state_path "$vcs_root")"
 # truncated scope hashes the same after an edit past the cut, and the retry
 # would be waved through as already reviewed.
 change_hash="$( { printf '%s' "$status_text"; cat "$diff_file"; } | text_hash )"
-if [[ -f "$STATE_FILE" ]] \
-   && [[ "$(cat "$STATE_FILE")" == "$change_hash" ]]; then
-  rm -f "$STATE_FILE"
-  allow "Codex: this change was already reviewed; the commit goes through."
+if [[ -f "$STATE_FILE" ]]; then
+  read -r reviewed_hash reviewed_at reviewed_head < "$STATE_FILE"
+  # A marker speaks for the revision it was written against and no other: on a
+  # new base the same change is a change nobody has reviewed there.
+  if [[ "$reviewed_head" == "$reviewed_revision" ]]; then
+    if [[ "$reviewed_hash" == "$change_hash" ]]; then
+      rm -f "$STATE_FILE"
+      allow "Codex: this change was already reviewed; the commit goes through."
+    fi
+    # The change moved on, but it moved on because the last review reached the
+    # agent. Reviewing the fix is the next commit's job, not this one's.
+    if [[ -n "$reviewed_at" ]] \
+       && [[ $(( $(date +%s) - reviewed_at )) -lt "$CODEX_REVIEW_COOLDOWN" ]]; then
+      rm -f "$STATE_FILE"
+      allow "Codex: the review of this change was already delivered; the commit goes through." \
+        "A codex review of this working copy was delivered less than ${CODEX_REVIEW_COOLDOWN}s ago and the change has moved on since. No second review ran; the commit goes through as is."
+    fi
+  fi
 fi
 
 run_with_timeout "$out" "$err" \
@@ -435,7 +470,8 @@ Nothing was changed on disk: the findings are yours to weigh."
 # clear is a refusal for good: every attempt would review the same scope again
 # and stop the commit again.
 if ! mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null \
-   || ! printf '%s' "$change_hash" >"$STATE_FILE" 2>/dev/null; then
+   || ! printf '%s %s %s\n' "$change_hash" "$(date +%s)" "$reviewed_revision" \
+        >"$STATE_FILE" 2>/dev/null; then
   allow "Codex: review done, the retry marker could not be stored; the commit goes through." \
     "$context
 
@@ -445,4 +481,4 @@ fi
 deny "Codex: the commit was stopped so the review reaches you." \
   "$context
 
-Apply what you agree with and re-run the same commit command: an unchanged scope goes straight through, an edited one is reviewed again."
+Apply what you agree with and re-run the same commit command: the retry goes through, edited or not, and the next commit is reviewed again."

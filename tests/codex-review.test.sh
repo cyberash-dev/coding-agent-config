@@ -100,6 +100,10 @@ EOF
   chmod +x "$TMP_ROOT/bin/codex"
 
   git -C "$TMP_ROOT/repo" init -q
+  # Commits made by these tests must not depend on the operator's own identity,
+  # nor on git deriving one from the host.
+  git -C "$TMP_ROOT/repo" config user.email review@example.test
+  git -C "$TMP_ROOT/repo" config user.name "Review Test"
   write_functions "$TMP_ROOT/repo/$staged" 12 charge
   git -C "$TMP_ROOT/repo" add "$staged"
 }
@@ -120,8 +124,9 @@ run_hook() {
 
 run_cursor_hook() {
   local command="${1:-git commit -m wip}"
+  shift $(( $# > 0 ? 1 : 0 ))
   printf '{"command":"%s","cwd":"%s","hook_event_name":"beforeShellExecution"}' "$command" "$TMP_ROOT/repo" \
-    | HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:$PATH" bash "$ROOT/hooks/cursor-commit-review.sh"
+    | HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:$PATH" env "$@" bash "$ROOT/hooks/cursor-commit-review.sh"
 }
 
 test_commit_review_reviews_the_staged_diff_through_the_skill_script() {
@@ -237,14 +242,14 @@ test_cursor_commit_review_lets_the_retry_through() {
   [[ "$(printf '%s' "$output" | jq -r '.permission')" == "allow" ]]
 }
 
-test_cursor_commit_review_reviews_again_after_the_change_moves_on() {
+test_cursor_commit_review_reviews_again_once_the_cooldown_has_passed() {
   hook_sandbox
-  run_cursor_hook >/dev/null || return 1
+  run_cursor_hook "git commit -m wip" CODEX_REVIEW_COOLDOWN=0 >/dev/null || return 1
   printf 'def refund():\n    return None\n' >> "$TMP_ROOT/repo/service.py"
   git -C "$TMP_ROOT/repo" add service.py
 
   local output
-  output="$(run_cursor_hook)" || return 1
+  output="$(run_cursor_hook "git commit -m wip" CODEX_REVIEW_COOLDOWN=0)" || return 1
 
   [[ "$(printf '%s' "$output" | jq -r '.permission')" == "deny" ]]
 }
@@ -370,7 +375,7 @@ test_commit_review_reviews_again_after_an_edit_past_the_scope_cap() {
   hook_sandbox
   write_functions "$TMP_ROOT/repo/refund.py" 12 refund
   git -C "$TMP_ROOT/repo" add refund.py
-  run_hook CODEX_REVIEW_MAX_SCOPE_BYTES=200 >/dev/null || return 1
+  run_hook CODEX_REVIEW_MAX_SCOPE_BYTES=200 CODEX_REVIEW_COOLDOWN=0 >/dev/null || return 1
   # Same length, same status, changed only in the part the scope cut away. The
   # diff is ordered by path, so service.py and its blob hash sit past the cap.
   sed -i.bak 's/def charge_12()/def rebate_12()/' "$TMP_ROOT/repo/service.py"
@@ -378,7 +383,7 @@ test_commit_review_reviews_again_after_an_edit_past_the_scope_cap() {
   git -C "$TMP_ROOT/repo" add service.py
 
   local output
-  output="$(run_hook CODEX_REVIEW_MAX_SCOPE_BYTES=200)" || return 1
+  output="$(run_hook CODEX_REVIEW_MAX_SCOPE_BYTES=200 CODEX_REVIEW_COOLDOWN=0)" || return 1
 
   [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
 }
@@ -571,6 +576,60 @@ test_commit_review_hands_over_an_escape_sequence_in_the_change() {
   grep -q $'\033\[31m' "$TMP_ROOT/review-call"
 }
 
+test_commit_review_lets_the_fixed_change_through_within_the_cooldown() {
+  hook_sandbox
+  run_hook >/dev/null || return 1
+  printf 'def refund():\n    return None\n' >> "$TMP_ROOT/repo/service.py"
+  git -C "$TMP_ROOT/repo" add service.py
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]]
+}
+
+test_commit_review_reviews_again_once_the_cooldown_has_passed() {
+  hook_sandbox
+  run_hook CODEX_REVIEW_COOLDOWN=0 >/dev/null || return 1
+  printf 'def refund():\n    return None\n' >> "$TMP_ROOT/repo/service.py"
+  git -C "$TMP_ROOT/repo" add service.py
+
+  local output
+  output="$(run_hook CODEX_REVIEW_COOLDOWN=0)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
+}
+
+test_commit_review_does_not_carry_the_cooldown_past_a_commit() {
+  hook_sandbox
+  run_hook >/dev/null || return 1
+  git -C "$TMP_ROOT/repo" commit -q -m first
+  write_functions "$TMP_ROOT/repo/refund.py" 12 refund
+  git -C "$TMP_ROOT/repo" add refund.py
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
+}
+
+test_commit_review_binds_the_marker_to_the_revision_it_reviewed() {
+  hook_sandbox
+  cat > "$TMP_ROOT/home/$HOOK_SKILL_SCRIPT_DIR/codex_review.py" <<EOF
+import subprocess
+subprocess.run(("git", "-C", "$TMP_ROOT/repo", "commit", "-q", "-m", "concurrent"), check=False)
+print('{"findings": [], "summary": "STUB REVIEW", "residual_risks": [], "tests_not_run": []}')
+EOF
+  run_hook >/dev/null || return 1
+  write_functions "$TMP_ROOT/repo/refund.py" 12 refund
+  git -C "$TMP_ROOT/repo" add refund.py
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
+}
+
 run_test() {
   local name="$1"
   if "$name"; then
@@ -592,6 +651,10 @@ run_test test_review_skills_keep_a_same_name_skill_owned_by_the_user
 run_test test_commit_review_reviews_the_staged_diff_through_the_skill_script
 run_test test_commit_review_denies_the_commit_and_reports_the_review
 run_test test_commit_review_lets_the_retry_through
+run_test test_commit_review_lets_the_fixed_change_through_within_the_cooldown
+run_test test_commit_review_reviews_again_once_the_cooldown_has_passed
+run_test test_commit_review_does_not_carry_the_cooldown_past_a_commit
+run_test test_commit_review_binds_the_marker_to_the_revision_it_reviewed
 run_test test_commit_review_leaves_the_working_copy_alone
 run_test test_commit_review_spawns_no_second_codex_pass
 run_test test_commit_review_skips_a_documentation_only_change
@@ -620,6 +683,6 @@ run_test test_commit_review_allows_the_commit_when_the_review_script_is_absent
 run_test test_commit_review_finds_the_skill_installed_for_the_other_harnesses
 run_test test_cursor_commit_review_denies_the_commit_and_reports_the_review
 run_test test_cursor_commit_review_lets_the_retry_through
-run_test test_cursor_commit_review_reviews_again_after_the_change_moves_on
+run_test test_cursor_commit_review_reviews_again_once_the_cooldown_has_passed
 run_test test_cursor_commit_review_ignores_a_command_that_is_not_a_commit
 run_test test_cursor_commit_review_allows_the_commit_when_the_review_script_is_absent
