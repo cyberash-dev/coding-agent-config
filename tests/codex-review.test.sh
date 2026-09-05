@@ -47,12 +47,39 @@ test_review_skills_are_removed_when_not_requested() {
   [[ ! -e "$TMP_ROOT/skills/codex-cli-review" ]]
 }
 
+write_functions() {
+  local path="$1" count="$2" name="$3" line
+  mkdir -p "$(dirname "$path")"
+  for line in $(seq 1 "$count"); do
+    printf 'def %s_%s():\n    return None\n' "$name" "$line" >> "$path"
+  done
+}
+
+write_list_entries() {
+  local path="$1" count="$2" line
+  mkdir -p "$(dirname "$path")"
+  for line in $(seq 1 "$count"); do
+    printf -- '- item %s\n' "$line" >> "$path"
+  done
+}
+
+write_dash_comments() {
+  local path="$1" count="$2" line
+  mkdir -p "$(dirname "$path")"
+  for line in $(seq 1 "$count"); do
+    printf -- '-- comment %s\n' "$line" >> "$path"
+  done
+}
+
 HOOK_SKILL_SCRIPT_DIR=".claude/skills/codex-cli-review/scripts"
 
 # A git working copy with one staged file, a stub review script where the hook
 # expects the installed codex-cli-review skill, and a codex stand-in that
 # records any call, so a pass writing to the working copy would show up.
+# The staged file is large enough to clear the hook's line floor; a test that
+# wants the floor to bite stages a smaller one over it.
 hook_sandbox() {
+  local staged="${1:-service.py}"
   sandbox
   mkdir -p "$TMP_ROOT/bin" "$TMP_ROOT/home/$HOOK_SKILL_SCRIPT_DIR" "$TMP_ROOT/repo"
 
@@ -73,8 +100,8 @@ EOF
   chmod +x "$TMP_ROOT/bin/codex"
 
   git -C "$TMP_ROOT/repo" init -q
-  printf 'def charge():\n    return None\n' > "$TMP_ROOT/repo/service.py"
-  git -C "$TMP_ROOT/repo" add service.py
+  write_functions "$TMP_ROOT/repo/$staged" 12 charge
+  git -C "$TMP_ROOT/repo" add "$staged"
 }
 
 # Index and tracked content of the sandbox repository — what a pass writing to
@@ -85,9 +112,10 @@ repo_state() {
   git -C "$TMP_ROOT/repo" diff
 }
 
+# Any argument is passed to `env`, so a test can set the hook's knobs.
 run_hook() {
   printf '{"tool_name":"Bash","tool_input":{"command":"git commit -m wip"},"cwd":"%s"}' "$TMP_ROOT/repo" \
-    | HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:$PATH" bash "$ROOT/hooks/codex-commit-review.sh"
+    | HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:$PATH" env "$@" bash "$ROOT/hooks/codex-commit-review.sh"
 }
 
 run_cursor_hook() {
@@ -297,6 +325,252 @@ test_review_home_is_removed_when_not_requested() {
   [[ ! -e "$TMP_ROOT/review-home" ]]
 }
 
+test_commit_review_skips_a_documentation_only_change() {
+  hook_sandbox docs/guide.md
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]] \
+    && [[ ! -e "$TMP_ROOT/review-call" ]]
+}
+
+test_commit_review_reviews_documentation_when_the_path_gate_is_empty() {
+  hook_sandbox docs/guide.md
+
+  run_hook CODEX_REVIEW_SKIP_PATHS= >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "docs/guide.md"
+}
+
+test_commit_review_skips_a_change_below_the_line_floor() {
+  hook_sandbox
+  printf 'def charge():\n    return None\n' > "$TMP_ROOT/repo/service.py"
+  git -C "$TMP_ROOT/repo" add service.py
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]] \
+    && [[ ! -e "$TMP_ROOT/review-call" ]]
+}
+
+test_commit_review_counts_a_new_untracked_directory_against_the_line_floor() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" reset -q
+  rm -f "$TMP_ROOT/repo/service.py"
+  write_functions "$TMP_ROOT/repo/feature/refund.py" 12 refund
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "feature/"
+}
+
+test_commit_review_reviews_again_after_an_edit_past_the_scope_cap() {
+  hook_sandbox
+  write_functions "$TMP_ROOT/repo/refund.py" 12 refund
+  git -C "$TMP_ROOT/repo" add refund.py
+  run_hook CODEX_REVIEW_MAX_SCOPE_BYTES=200 >/dev/null || return 1
+  # Same length, same status, changed only in the part the scope cut away. The
+  # diff is ordered by path, so service.py and its blob hash sit past the cap.
+  sed -i.bak 's/def charge_12()/def rebate_12()/' "$TMP_ROOT/repo/service.py"
+  rm -f "$TMP_ROOT/repo/service.py.bak"
+  git -C "$TMP_ROOT/repo" add service.py
+
+  local output
+  output="$(run_hook CODEX_REVIEW_MAX_SCOPE_BYTES=200)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
+}
+
+test_commit_review_truncates_a_scope_over_the_cap() {
+  hook_sandbox
+
+  run_hook CODEX_REVIEW_MAX_SCOPE_BYTES=200 >/dev/null || return 1
+
+  local scope
+  scope="$(cat "$TMP_ROOT/review-call")"
+  assert_contains "$scope" "truncated" || return 1
+  [[ "$(printf '%s' "$scope" | wc -c)" -lt 2000 ]]
+}
+
+test_commit_review_keeps_a_truncated_scope_readable_as_utf8() {
+  hook_sandbox
+  printf 'def refund():\n    """Возврат платежа, полностью на кириллице."""\n' \
+    >> "$TMP_ROOT/repo/service.py"
+  git -C "$TMP_ROOT/repo" add service.py
+
+  # 564 bytes into this diff is the middle of a two-byte character.
+  run_hook CODEX_REVIEW_MAX_SCOPE_BYTES=564 >/dev/null || return 1
+
+  python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")' \
+    "$TMP_ROOT/review-call"
+}
+
+test_commit_review_counts_an_untracked_path_with_a_space() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" reset -q
+  rm -f "$TMP_ROOT/repo/service.py"
+  write_functions "$TMP_ROOT/repo/new feature/refund.py" 12 refund
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "new feature"
+}
+
+test_commit_review_reviews_a_dependency_manifest() {
+  hook_sandbox requirements.txt
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "requirements.txt"
+}
+
+test_commit_review_counts_a_changed_line_that_starts_with_a_dash() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" reset -q
+  rm -f "$TMP_ROOT/repo/service.py"
+  git -C "$TMP_ROOT/repo" commit -q --allow-empty -m base
+  write_list_entries "$TMP_ROOT/repo/values.yaml" 12
+  git -C "$TMP_ROOT/repo" add values.yaml
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "values.yaml"
+}
+
+test_commit_review_reviews_a_rename_out_of_a_reviewed_path() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" commit -q -m base
+  git -C "$TMP_ROOT/repo" mv service.py notes.md
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "service.py"
+}
+
+test_commit_review_skips_a_documentation_path_with_a_space() {
+  hook_sandbox "docs/user guide.md"
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]] \
+    && [[ ! -e "$TMP_ROOT/review-call" ]]
+}
+
+test_commit_review_counts_a_removed_line_that_starts_with_two_dashes() {
+  hook_sandbox
+  write_dash_comments "$TMP_ROOT/repo/schema.sql" 12
+  git -C "$TMP_ROOT/repo" add schema.sql
+  git -C "$TMP_ROOT/repo" commit -q -m base
+  : > "$TMP_ROOT/repo/schema.sql"
+  git -C "$TMP_ROOT/repo" add schema.sql
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "schema.sql"
+}
+
+test_commit_review_skips_a_new_directory_of_documentation() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" reset -q
+  rm -f "$TMP_ROOT/repo/service.py"
+  mkdir -p "$TMP_ROOT/repo/docs"
+  write_dash_comments "$TMP_ROOT/repo/docs/guide.md" 12
+  write_dash_comments "$TMP_ROOT/repo/docs/design.md" 12
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]] \
+    && [[ ! -e "$TMP_ROOT/review-call" ]]
+}
+
+test_commit_review_skips_a_new_directory_whose_code_is_ignored() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" reset -q
+  rm -f "$TMP_ROOT/repo/service.py"
+  printf 'vendor/\n' > "$TMP_ROOT/repo/.gitignore"
+  git -C "$TMP_ROOT/repo" add .gitignore
+  git -C "$TMP_ROOT/repo" commit -q -m base
+  write_dash_comments "$TMP_ROOT/repo/docs/guide.md" 12
+  write_functions "$TMP_ROOT/repo/docs/vendor/lib.py" 30 charge
+
+  local output
+  output="$(run_hook)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "allow" ]] \
+    && [[ ! -e "$TMP_ROOT/review-call" ]]
+}
+
+test_commit_review_reviews_a_mode_change() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" commit -q -m base
+  chmod +x "$TMP_ROOT/repo/service.py"
+  git -C "$TMP_ROOT/repo" add service.py
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "service.py"
+}
+
+test_commit_review_reviews_a_replaced_binary() {
+  hook_sandbox
+  printf 'a\000b\n' > "$TMP_ROOT/repo/logo.bin"
+  git -C "$TMP_ROOT/repo" add logo.bin
+  git -C "$TMP_ROOT/repo" commit -q -m base
+  printf 'c\000d\n' > "$TMP_ROOT/repo/logo.bin"
+  git -C "$TMP_ROOT/repo" add logo.bin
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "logo.bin"
+}
+
+test_commit_review_counts_changed_lines_when_the_vcs_colours_its_diff() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" config color.ui always
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "service.py"
+}
+
+test_commit_review_counts_an_untracked_last_line_without_a_newline() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" reset -q
+  rm -f "$TMP_ROOT/repo/service.py"
+  write_functions "$TMP_ROOT/repo/late.py" 4 charge
+  printf 'def charge_5():' >> "$TMP_ROOT/repo/late.py"
+
+  local output
+  output="$(run_hook CODEX_REVIEW_MIN_LINES=9)" || return 1
+
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision')" == "deny" ]]
+}
+
+test_commit_review_reviews_a_coloured_rename() {
+  hook_sandbox
+  git -C "$TMP_ROOT/repo" commit -q -m base
+  git -C "$TMP_ROOT/repo" config color.ui always
+  git -C "$TMP_ROOT/repo" mv service.py notes.md
+
+  run_hook >/dev/null || return 1
+
+  assert_contains "$(cat "$TMP_ROOT/review-call")" "service.py"
+}
+
+test_commit_review_hands_over_an_escape_sequence_in_the_change() {
+  hook_sandbox
+  printf 'BANNER = "\033[31mred\033[0m"\n' >> "$TMP_ROOT/repo/service.py"
+  git -C "$TMP_ROOT/repo" add service.py
+
+  run_hook >/dev/null || return 1
+
+  grep -q $'\033\[31m' "$TMP_ROOT/review-call"
+}
+
 run_test() {
   local name="$1"
   if "$name"; then
@@ -320,6 +594,27 @@ run_test test_commit_review_denies_the_commit_and_reports_the_review
 run_test test_commit_review_lets_the_retry_through
 run_test test_commit_review_leaves_the_working_copy_alone
 run_test test_commit_review_spawns_no_second_codex_pass
+run_test test_commit_review_skips_a_documentation_only_change
+run_test test_commit_review_reviews_documentation_when_the_path_gate_is_empty
+run_test test_commit_review_skips_a_change_below_the_line_floor
+run_test test_commit_review_counts_a_new_untracked_directory_against_the_line_floor
+run_test test_commit_review_reviews_again_after_an_edit_past_the_scope_cap
+run_test test_commit_review_truncates_a_scope_over_the_cap
+run_test test_commit_review_keeps_a_truncated_scope_readable_as_utf8
+run_test test_commit_review_counts_an_untracked_path_with_a_space
+run_test test_commit_review_reviews_a_dependency_manifest
+run_test test_commit_review_counts_changed_lines_when_the_vcs_colours_its_diff
+run_test test_commit_review_reviews_a_coloured_rename
+run_test test_commit_review_hands_over_an_escape_sequence_in_the_change
+run_test test_commit_review_counts_an_untracked_last_line_without_a_newline
+run_test test_commit_review_counts_a_changed_line_that_starts_with_a_dash
+run_test test_commit_review_counts_a_removed_line_that_starts_with_two_dashes
+run_test test_commit_review_skips_a_new_directory_of_documentation
+run_test test_commit_review_skips_a_new_directory_whose_code_is_ignored
+run_test test_commit_review_reviews_a_rename_out_of_a_reviewed_path
+run_test test_commit_review_reviews_a_mode_change
+run_test test_commit_review_reviews_a_replaced_binary
+run_test test_commit_review_skips_a_documentation_path_with_a_space
 run_test test_commit_review_allows_the_commit_when_the_retry_marker_cannot_be_stored
 run_test test_commit_review_allows_the_commit_when_the_review_script_is_absent
 run_test test_commit_review_finds_the_skill_installed_for_the_other_harnesses

@@ -13,6 +13,14 @@
 # remembered, so a retry on an unchanged scope is let through instead of
 # starting another review.
 #
+# What a review costs is (turns × context), and the child re-sends its context on
+# every turn, so the change has to be worth a pass at all: a diff of nothing but
+# prose or lock files (CODEX_REVIEW_SKIP_PATHS) or under CODEX_REVIEW_MIN_LINES
+# lines is let through unreviewed, and one over CODEX_REVIEW_MAX_SCOPE_BYTES is
+# truncated with the cut declared in the scope. The child's own CODEX_HOME —
+# review-scoped rules, small model, no MCP servers, no plugins — is the review
+# skill's business, not the hook's.
+#
 # Two envelopes for that refusal, selected by COMMIT_REVIEW_PROTOCOL:
 #   claude (default) — PreToolUse (Bash), permissionDecision:"deny" with the
 #     review in permissionDecisionReason.
@@ -123,12 +131,6 @@ text_hash() {
   fi
 }
 
-file_hash() {
-  local f="$1"
-  [[ -f "$f" ]] || { printf 'absent'; return; }
-  text_hash < "$f"
-}
-
 # Where the hash of an already reported review is kept, per working copy.
 state_path() {
   printf '%s/.cache/coding-agent-config/commit-review/%s' \
@@ -192,6 +194,11 @@ cleanup() { [[ -s "$TMPLIST" ]] && xargs rm -f <"$TMPLIST" 2>/dev/null; rm -f "$
 trap cleanup EXIT
 
 CODEX_REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-600}"
+# A review costs a full model pass over the change, so the change has to be
+# worth one. Set either gate to nothing (empty list, floor of 0) to switch it off.
+CODEX_REVIEW_SKIP_PATHS="${CODEX_REVIEW_SKIP_PATHS-*.md *.rst *.adoc *.lock package-lock.json pnpm-lock.yaml go.sum LICENSE NOTICE}"
+CODEX_REVIEW_MIN_LINES="${CODEX_REVIEW_MIN_LINES:-10}"
+CODEX_REVIEW_MAX_SCOPE_BYTES="${CODEX_REVIEW_MAX_SCOPE_BYTES:-200000}"
 run_with_timeout() {
   local out_file="$1" err_file="$2"
   shift 2
@@ -226,7 +233,136 @@ else
 fi
 
 # Nothing uncommitted — no review to run, and no commit to hold up.
-[[ -n "$( (cd "$vcs_root" && "$vcs" status --short 2>/dev/null) )" ]] || exit 0
+# With `color.ui = always` a status code arrives behind an escape sequence and
+# no gate recognises it.
+uncoloured() {
+  sed $'s/\033\[[0-9;]*[a-zA-Z]//g'
+}
+
+status_text=$( (cd "$vcs_root" && "$vcs" status --short 2>/dev/null) | uncoloured )
+[[ -n "$status_text" ]] || exit 0
+
+# A status line is two status characters, a space, then the path, which status
+# quotes when it carries a space. A rename prints `old -> new` and both sides
+# count: moving a module to a documentation name is not a documentation change.
+changed_paths() {
+  status_paths
+  untracked_files
+}
+
+# Tracked entries only: status collapses a new directory into one `dir/` entry,
+# which no basename gate can match, so untracked paths come from the walk below.
+status_paths() {
+  printf '%s\n' "$status_text" | awk '
+    NF && $0 !~ /^\?\?/ {
+      path = substr($0, 4)
+      arrow = index(path, " -> ")
+      if (arrow) {
+        print unquoted(substr(path, 1, arrow - 1))
+        print unquoted(substr(path, arrow + 4))
+      } else {
+        print unquoted(path)
+      }
+    }
+    function unquoted(value) {
+      gsub(/^"|"$/, "", value)
+      return value
+    }'
+}
+
+is_skipped_path() {
+  local name="${1##*/}" pattern
+  local -a patterns
+  # Split the list on whitespace WITHOUT expanding it: unquoted, `*.md` would
+  # first become the names of the .md files next to the hook's own cwd, and
+  # every other path would then be reviewed.
+  set -f
+  patterns=( $CODEX_REVIEW_SKIP_PATHS )
+  set +f
+  for pattern in ${patterns[@]+"${patterns[@]}"}; do
+    # shellcheck disable=SC2053  # $pattern is a glob on purpose
+    [[ "$name" == $pattern ]] && return 0
+  done
+  return 1
+}
+
+# One path per line, relative to the root: the files the commit would add, with
+# a collapsed directory opened and ignored descendants left out. Short status
+# quotes a path that carries a space, so the listing is asked for directly and
+# the parse is a fallback for a VCS that cannot list.
+untracked_files() {
+  local listed path
+  listed=$( (cd "$vcs_root" && "$vcs" ls-files --others --exclude-standard -z 2>/dev/null) \
+    | tr '\0' '\n' )
+  if [[ -n "$listed" ]]; then
+    printf '%s\n' "$listed"
+    return
+  fi
+  ( cd "$vcs_root" || return
+    while IFS= read -r path; do
+      [[ -e "$path" ]] || continue
+      find "$path" -type f 2>/dev/null
+    done < <(printf '%s\n' "$status_text" | sed -nE 's/^\?\?[[:space:]]//p') )
+}
+
+# Untracked files carry no diff at all, so a new file would read as a zero-line
+# change and duck the floor its content deserves. Status collapses a new
+# directory into a single `dir/` entry, so the walk has to open it.
+untracked_lines() {
+  local path total=0
+  while IFS= read -r path; do
+    [[ -f "$vcs_root/$path" ]] || continue
+    total=$((total + $(awk 'END { print NR + 0 }' "$vcs_root/$path")))
+  done < <(untracked_files)
+  printf '%s' "$total"
+}
+
+reviewable_paths=0
+while IFS= read -r changed_path; do
+  is_skipped_path "$changed_path" || { reviewable_paths=1; break; }
+done < <(changed_paths)
+
+[[ "$reviewable_paths" -eq 1 ]] || allow \
+  "$vcs commit: prose and lock files only; review skipped." \
+  "The $vcs commit changes only paths the review gate skips ($CODEX_REVIEW_SKIP_PATHS). No review ran, the commit goes through as is."
+
+diff_file=$(mktmp)
+# Review what actually goes into the commit: the staged diff (`commit` commits
+# the index). The unstaged half covers the `commit -a` workflow without a
+# preceding `add`. Otherwise the unstaged diff is empty after `add` and codex
+# has nothing to review.
+(cd "$vcs_root" && { "$vcs" diff --cached 2>/dev/null; "$vcs" diff 2>/dev/null; }) >"$diff_file"
+
+# What the gates parse. The file itself stays verbatim: it is what the reviewer
+# reads and what the retry is fingerprinted by, and a diff can carry an escape
+# sequence of its own that belongs to the change.
+diff_text() {
+  uncoloured < "$diff_file"
+}
+
+# Every added or removed line inside a hunk. Header lines live outside one, so
+# content that starts with a sign of its own — a `+- item` YAML entry, a
+# removed `-- comment` — is counted rather than mistaken for a header.
+diff_lines() {
+  diff_text | awk '
+    /^@@/ { in_hunk = 1; next }
+    /^diff / { in_hunk = 0; next }
+    in_hunk && /^[+-]/ { changed++ }
+    END { print changed + 0 }'
+}
+
+# Changes a diff cannot count in lines, none of them small: a file that moved
+# or vanished for everything that consumed it, a script that gained or lost its
+# executable bit, a binary replaced wholesale.
+has_structural_change() {
+  printf '%s\n' "$status_text" | grep -qE '^[RD]|^.[RD]' && return 0
+  diff_text | grep -qE '^(old mode |new mode |Binary files |GIT binary patch)'
+}
+
+changed_lines=$(( $(diff_lines) + $(untracked_lines) ))
+[[ "$changed_lines" -ge "$CODEX_REVIEW_MIN_LINES" ]] || has_structural_change || allow \
+  "$vcs commit: $changed_lines changed line(s); review skipped." \
+  "The $vcs commit changes $changed_lines line(s), under the review floor of $CODEX_REVIEW_MIN_LINES. No review ran, the commit goes through as is."
 
 # The skill lands in a different root per harness, and the hook may be running
 # under a harness that is not the one that installed it.
@@ -244,22 +380,34 @@ REVIEW_SCRIPT="$(review_script)" || allow "codex-cli-review skill is not install
 
 # Scope handed to the reviewer; its hash is what a retry is recognised by.
 scope_file=$(mktmp)
+diff_bytes=$(wc -c < "$diff_file")
 {
   printf 'Review the current uncommitted %s working-copy changes.\nRepository root: %s\n\n' "$vcs" "$vcs_root"
-  printf '<%s_status>\n%s\n</%s_status>\n\n' "$vcs" "$( (cd "$vcs_root" && "$vcs" status --short 2>/dev/null) )" "$vcs"
+  printf '<%s_status>\n%s\n</%s_status>\n\n' "$vcs" "$status_text" "$vcs"
   printf '<%s_diff>\n' "$vcs"
-  # Review what actually goes into the commit: the staged diff (`commit` commits
-  # the index). The unstaged half covers the `commit -a` workflow without a
-  # preceding `add`. Otherwise the unstaged diff is empty after `add` and codex
-  # has nothing to review.
-  (cd "$vcs_root" && { "$vcs" diff --cached 2>/dev/null; "$vcs" diff 2>/dev/null; })
+  # A diff past the cap is a generated or vendored bulk change: the reviewer
+  # would re-send every byte of it on every turn, so it is cut and said to be cut.
+  if [[ "$diff_bytes" -gt "$CODEX_REVIEW_MAX_SCOPE_BYTES" ]]; then
+    # Dropping the cut line keeps the scope valid UTF-8: a byte cap lands
+    # inside a multibyte character sooner or later, and the reviewer reads the
+    # file as UTF-8 or not at all.
+    head -c "$CODEX_REVIEW_MAX_SCOPE_BYTES" "$diff_file" | sed '$d'
+    printf '\n[diff truncated to %s of %s bytes; the rest of the change was not reviewed]\n' \
+      "$CODEX_REVIEW_MAX_SCOPE_BYTES" "$diff_bytes"
+  else
+    cat "$diff_file"
+  fi
   printf '</%s_diff>\n\n' "$vcs"
   printf 'Inspect the exact untracked files listed by status. Read unchanged files only when needed to verify a finding. Do not scan unrelated directories.\n'
 } >"$scope_file"
 
 STATE_FILE="$(state_path "$vcs_root")"
+# Fingerprint the change itself, not the scope the reviewer was handed: a
+# truncated scope hashes the same after an edit past the cut, and the retry
+# would be waved through as already reviewed.
+change_hash="$( { printf '%s' "$status_text"; cat "$diff_file"; } | text_hash )"
 if [[ -f "$STATE_FILE" ]] \
-   && [[ "$(cat "$STATE_FILE")" == "$(file_hash "$scope_file")" ]]; then
+   && [[ "$(cat "$STATE_FILE")" == "$change_hash" ]]; then
   rm -f "$STATE_FILE"
   allow "Codex: this change was already reviewed; the commit goes through."
 fi
@@ -287,7 +435,7 @@ Nothing was changed on disk: the findings are yours to weigh."
 # clear is a refusal for good: every attempt would review the same scope again
 # and stop the commit again.
 if ! mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null \
-   || ! file_hash "$scope_file" >"$STATE_FILE" 2>/dev/null; then
+   || ! printf '%s' "$change_hash" >"$STATE_FILE" 2>/dev/null; then
   allow "Codex: review done, the retry marker could not be stored; the commit goes through." \
     "$context
 

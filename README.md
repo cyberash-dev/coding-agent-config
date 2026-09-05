@@ -308,6 +308,14 @@ cheaper model that needs more of them to reach the same finding is not cheaper.
 `CODEX_REVIEW_MODEL` pins one per machine where the account says otherwise. The
 generated file itself is rewritten on every install.
 
+**Gates before the pass.** The hook skips the review outright, and says so, when
+the change is only prose or lock files (`CODEX_REVIEW_SKIP_PATHS`, matched
+against both sides of a rename) or smaller than `CODEX_REVIEW_MIN_LINES` (10;
+untracked files count their own length and a rename or delete clears the floor
+outright, since no diff covers either). A diff over `CODEX_REVIEW_MAX_SCOPE_BYTES` (200000) is
+truncated, with the cut declared in the scope. Set a list to empty or a floor to
+0 to switch that gate off.
+
 The review policy pulls its weight too: `code-review/SKILL.md` treats the rules
 already in context as loaded, so the child no longer walks the tree above the
 review root re-reading the same rule files it was started with.
