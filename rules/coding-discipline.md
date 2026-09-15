@@ -5,10 +5,11 @@ speed. Use judgment for trivial work.
 
 ## Think Before Coding
 Don't assume. Don't hide confusion. Surface tradeoffs.
-- State assumptions explicitly. If uncertain, ask.
+- State assumptions explicitly. Ask only when the work cannot be done correctly
+  without the answer: stop, name what's confusing, ask. Otherwise state the
+  assumption and continue.
 - If multiple interpretations exist, present them — don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
 - Don't guess APIs, versions, flags, commit SHAs, or package names.
   Verify by reading the code or docs before asserting.
 - Prove claims about existing behaviour or data flow. When you assert a
