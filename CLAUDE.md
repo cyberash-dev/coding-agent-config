@@ -21,6 +21,7 @@ Rules are split by topic across files in `~/.claude/rules/`. Each file is pulled
 
 ## Output
 - @rules/output-style.md — concise output, no filler, no emojis or em-dashes
+- @rules/technical-answers.md — answer scope, agreed baseline, level of detail, contract deltas
 
 ## Tooling
 - @rules/code-navigation.md — tool priority: LSP / code-skeleton / Grep / Read
