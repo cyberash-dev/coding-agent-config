@@ -14,6 +14,19 @@
   branch actually ran on failure
 - A test reads top-to-bottom on its own. A reader should understand setup,
   action, and expectation without jumping into fixtures or helpers
+- Every test asserts on an observable result. A test that only calls the code,
+  or passes merely because nothing was thrown, checks nothing. When "does not
+  raise" is the behavior, assert it explicitly
+- Expected values are literals written by hand. Never compute the expectation
+  with the production code or a copy of its algorithm — the test then agrees
+  with any bug in it
+- Assert only what the behavior defines. Don't compare a whole payload or
+  snapshot when the test is about one field; unrelated details make it break
+  on every harmless change
+- Test the core behavior, not just the easy side effects around it (a log line,
+  a call count, a row existing)
+- Coverage points at untested code; it is never the goal. Don't write tests to
+  hit lines
 
 ## What to mock
 - Mock only at **system boundaries**: external APIs, clock, filesystem, network,
@@ -27,6 +40,11 @@
   output, a schema definition, or generated/contract structure (reflection
   guards). A test that would pass without exercising real behavior tests the
   framework, not the code
+- A test with more mocks than real collaborators tests the mocks. Move it to a
+  level where the real code runs
+- Don't bend production code for a test: no reflection into private state, no
+  widened visibility, no test-only methods or flags. If a behavior can't be
+  observed through the public API, inject the boundary it depends on
 
 ## No fixtures, no setUp/tearDown
 - **Do not use fixtures, `setUp`/`tearDown`, or `conftest`-level shared
@@ -38,6 +56,8 @@
 - If construction is genuinely noisy, extract a **plain function** with an
   explicit name (`a_user_with_balance(100)`) and call it from Arrange.
   Functions are honest — fixtures rely on framework magic and ordering
+- No constants or test-data modules shared between tests either. A literal
+  reused across tests is hidden context: each test states its own inputs
 - Use **parametrization** when the same test logic runs against many
   inputs — do not loop inside a test
 - Exception: if the project already uses fixtures pervasively, match the
@@ -61,6 +81,20 @@
 - Match test count to behavior complexity. Don't pile near-duplicate cases on
   trivial logic; cover the key cases plus the untested siblings, and drop
   redundant guard tests that assert nothing about real behavior
+- Organize tests by behavior, not one test per production method. A test lives
+  in the file of the unit it exercises. A test file grown to hundreds of cases
+  signals a unit that does too much: flag it
+- Tests are silent when green: no `print` or log output on success. Diagnostic
+  detail belongs in the failure message
+
+## Prove the test can fail
+- A test written against code that already exists was never red. Break the
+  code under test on purpose (invert the condition, return a constant), confirm
+  the test goes red on its assertion, then restore the code. A test that stays
+  green is useless: rewrite it
+- When an existing test goes red, it found something. Don't change its expected
+  value to whatever the code returns now unless the task changed that behavior;
+  otherwise report the regression
 
 ## Negative paths
 - Every public behavior has tests for invalid input, boundary values, and
@@ -80,6 +114,15 @@
   reset it explicitly in setup, never rely on test order
 - No test depends on another test having run (or not run) first
 - No real time, real network, real database without explicit opt-in
+- Keep tests that need real services in a separately selectable suite (marker
+  or directory) so the default run stays fast and offline
+- No `sleep` to wait for async work. Wait on the condition with a bounded
+  timeout, or drive a fake clock/scheduler
+- Write files only into a per-test temporary directory from the framework
+  (`tmp_path`), never into the repo or home. Don't depend on the machine's
+  locale, timezone, env vars, or absolute paths — set what the test needs
+- No retry-on-failure plugins or annotations. A flaky test is a bug in the test
+  or the code: reproduce and fix it
 - A DB query without `ORDER BY` returns rows in nondeterministic order; a test
   asserting a fixed order is flaky — add `ORDER BY` or sort before asserting
 - Failing test must point to the cause — assertion messages should be specific
