@@ -2,8 +2,8 @@
 # Copy this repo's rules, hooks and skills into per-user agent config locations
 # and register hooks in ~/.claude/settings.json.
 #
-# Usage: install.sh <claude|codex|cursor|all> [--sdd] [--teams] [--codex-review]
-#                   [--update-mcps] [--lang=ru|en]
+# Usage: install.sh <claude|codex|cursor|deepseek|all> [--sdd] [--teams]
+#                   [--codex-review] [--update-mcps] [--lang=ru|en]
 #
 # --lang  Pin the agent's reply language. Without it, the agent replies in
 #         whatever language the operator used. With `--lang=ru` or
@@ -42,6 +42,18 @@
 #         Update already installed npm-backed MCP packages to npm latest
 #         without prompting instead of asking per package.
 #
+# deepseek mode
+#         Install the universal rules as the user-global instructions
+#         ${DSH_HOME:-~/.dsh}/AGENTS.md, so DSH loads them in every session,
+#         and the skills into ~/.agents/skills, which DSH reads as well. The
+#         MCP server, the commit-review hook and (with --teams) the delegation
+#         persona are profile rows rather than config files of their own: they
+#         go into the marked block at the end of every DSH profile's
+#         cordis.patch.yml and the home-level patch, and are dropped again when
+#         the option that added them is left out. The rows raise the
+#         instructions byte budget so the whole AGENTS.md is injected instead
+#         of being cut off.
+#
 # Hooks: install.sh always installs the scripts from `hooks/`. Registration in
 # ~/.claude/settings.json and ~/.cursor/hooks.json is idempotent — the entry
 # this repo owns is replaced where it already sits, a same-name hook of the
@@ -67,7 +79,7 @@ source "$REPO_ROOT/scripts/lib/install-lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 <claude|codex|cursor|all> [--sdd] [--teams] [--codex-review] [--update-mcps] [--lang=ru|en]
+Usage: $0 <claude|codex|cursor|deepseek|all> [--sdd] [--teams] [--codex-review] [--update-mcps] [--lang=ru|en]
 
   claude   generate ~/.claude/CLAUDE.md, copy ~/.claude/rules and
            ~/.claude/hooks
@@ -75,7 +87,10 @@ Usage: $0 <claude|codex|cursor|all> [--sdd] [--teams] [--codex-review] [--update
            and copy skills into ~/.agents/skills
   cursor   build the .mdc rule set into ~/.cursor/rules, copy hooks into
            ~/.cursor/hooks and skills into ~/.agents/skills
-  all      all three
+  deepseek build AGENTS.md, copy it to ${DSH_HOME:-~/.dsh}/AGENTS.md, copy
+           skills into ~/.agents/skills and add the MCP and hook rows to
+           the DSH profile patches
+  all      all four
 
   --lang   pin the reply language to ru or en. Omit to keep replying in
            the operator's own language.
@@ -127,8 +142,14 @@ done
 # put the review hook. Say what the flag does there instead of leaving the
 # missing hook unexplained.
 if [[ "$CODEX_REVIEW" -eq 1 && "$MODE" == "codex" ]]; then
-  echo "install.sh: --codex-review installs the review skills; the commit hook is claude/cursor only" >&2
+  echo "install.sh: --codex-review installs the review skills; the commit hook is claude/cursor/deepseek only" >&2
 fi
+
+# The rules are one instruction file, and DSH loads it or drops it: its base
+# budget (64 KiB) is sized for a few files, and the flat file is already more
+# than half of that. The budget the install writes leaves room for a rule or two
+# more before the most specific file stops fitting.
+DSH_INSTRUCTIONS_MAX_BYTES=196608
 
 CODEX_CONFIG_DIR="${CODEX_HOME:-$AGENT_HOME/.codex}"
 REVIEW_SKILLS="$REPO_ROOT/codex-review/skills"
@@ -198,6 +219,14 @@ install_codex() {
   install_codex_subagents "$TEAMS"
 }
 
+install_deepseek_mode() {
+  # The hooks are copied before the rows are written, so a patch never names a
+  # script that is not there yet.
+  install_tree "$REPO_ROOT/hooks" "$AGENT_HOME/.agents/hooks"
+  install_deepseek "$REPO_ROOT" "$REPO_ROOT/build" "$LANG_MODE" "$TEAMS" \
+    "$CODEX_REVIEW" "$REVIEW_SKILLS" "$DSH_INSTRUCTIONS_MAX_BYTES"
+}
+
 install_cursor() {
   echo "[cursor]"
   local build_args=(--lang="$LANG_MODE")
@@ -216,8 +245,8 @@ install_cursor() {
 }
 
 case "$MODE" in
-  claude|codex|cursor|all) ;;
-  *)                       usage ;;
+  claude|codex|cursor|deepseek|all) ;;
+  *)                                usage ;;
 esac
 
 require_deps
@@ -231,7 +260,8 @@ case "$MODE" in
   claude) install_claude ;;
   codex)  install_codex ;;
   cursor) install_cursor ;;
-  all)    install_claude; install_codex; install_cursor ;;
+  deepseek) install_deepseek_mode ;;
+  all)    install_claude; install_codex; install_cursor; install_deepseek_mode ;;
 esac
 
 # One review home per user: every surface runs its review through the same
@@ -241,10 +271,11 @@ install_codex_review_home "$CODEX_REVIEW" "$REPO_ROOT" \
 
 # agent-sdd writes its own rules/skill/hooks into the target config(s); run it
 # last so the build steps finish before agent-sdd appends to the installed
-# ~/.codex/AGENTS.md. It targets claude and codex; there is no cursor mode.
+# ~/.codex/AGENTS.md. It targets claude and codex; there is no cursor or DSH
+# mode.
 if [[ "$SDD" -eq 1 ]]; then
-  if [[ "$MODE" == "cursor" ]]; then
-    echo "install.sh: agent-sdd has no cursor target; skipping 'sdd install'" >&2
+  if [[ "$MODE" == "cursor" || "$MODE" == "deepseek" ]]; then
+    echo "install.sh: agent-sdd has no $MODE target; skipping 'sdd install'" >&2
   elif command -v sdd >/dev/null 2>&1; then
     sdd install "$MODE"
   else

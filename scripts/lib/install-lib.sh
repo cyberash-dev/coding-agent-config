@@ -17,6 +17,7 @@
 #   install_codex_subagents <0|1>
 #   install_codex_review_hook <0|1>
 #   install_codex_review_home <0|1> <repo_root> <home_dir> <codex_config_dir>
+#   install_deepseek <repo_root> <build_dir> <lang> <teams> <codex_review> <review_skills_root> <instructions_max_bytes>
 #   install_cursor_hook <script> <event> [<matcher>]
 #   remove_cursor_hook <script|basename> <event>
 #   install_cursor_review_hook <0|1>
@@ -46,6 +47,7 @@
 #   SETTINGS_BACKED_UP   — 0/1 flag, mutated by every $SETTINGS writer; also set
 #                          when the installer created the file itself, so an
 #                          empty scaffold is never backed up
+#   DSH_HOME             — path to the DeepSeek Harness config root, ${DSH_HOME:-$AGENT_HOME/.dsh}
 #
 # Targets are anchored at $AGENT_HOME (see lib/platform.sh), which equals $HOME
 # everywhere except native Windows.
@@ -76,6 +78,9 @@ if [[ -z "${AGENT_CONFIG_LIB_LOADED:-}" ]]; then
 
   CURSOR_MCP="$AGENT_HOME/.cursor/mcp.json"
   CURSOR_MCP_BACKED_UP=0
+
+  # The harness resolves its home the same way: $DSH_HOME wins over ~/.dsh.
+  DSH_HOME="${DSH_HOME:-$AGENT_HOME/.dsh}"
 fi
 
 # Back up $SETTINGS once per install run (first mutation only).
@@ -1011,6 +1016,291 @@ TOML
 
   ln -sfn "$codex_config_dir/auth.json" "$home_dir/auth.json"
   echo "  + $home_dir"
+}
+
+# ----------------------------------------------------------------------------
+# DeepSeek Harness
+#
+# DSH reads the same shapes the other harnesses do, but from its own places:
+#   ~/.dsh/AGENTS.md   — user-global instructions, loaded before the project's
+#                        own AGENTS.md/CLAUDE.md and ~/.agents/AGENTS.md
+#   ~/.agents/skills   — shared skills, the same root Codex and Cursor read
+#   dsh-mcp-client     — mounted as a row in the harness's patch layer, one per
+#                        MCP server
+# The patch layer ($DSH_HOME/cordis.patch.yml) is the harness's own file, so
+# the rows this installer adds sit in a marked block: everything else in that
+# file is left alone, and the rows are taken out again when the option that
+# added them is dropped.
+# ----------------------------------------------------------------------------
+
+# Marks the managed block in a patch file. Ownership is the block, not the YAML
+# inside it, so a row the user rewrote by hand survives a re-install.
+DSH_PATCH_MARKER="# coding-agent-config"
+
+# Install the universal rules into the DeepSeek Harness:
+#   <build_dir>/AGENTS.deepseek.md — the flat instruction file (CLAUDE.md with
+#                                    the @rules imports inlined, plus the
+#                                    orchestration and language sections)
+#   ~/.dsh/AGENTS.md               — that file, installed
+#   ~/.agents/skills               — skills, shared with Codex and Cursor
+#   $DSH_HOME/cordis.patch.yml     — code-skeleton MCP, the commit review
+#                                    hook, the --teams persona row and the
+#                                    instructions byte budget
+#
+# Args:
+#   <repo_root>            this repo, for the templates and build.sh
+#   <build_dir>            where the flat file is built
+#   <lang>                 default|ru|en
+#   <teams>                0|1
+#   <codex_review>         0|1
+#   <review_skills_root>   codex-review/skills
+#   <instructions_max_bytes>
+#                          byte budget for the user-global instructions, so the
+#                          whole file is injected instead of being cut off
+install_deepseek() {
+  local repo_root="$1"
+  local build_dir="$2"
+  local lang="$3"
+  local teams="$4"
+  local codex_review="$5"
+  local review_skills="$6"
+  local instructions_max_bytes="$7"
+
+  echo "[deepseek]"
+  local agents_md="$build_dir/AGENTS.deepseek.md"
+  "$repo_root/scripts/build.sh" --lang="$lang" --out="$agents_md" \
+    $([[ "$teams" -eq 1 ]] && printf -- '--teams')
+  install_file "$agents_md" "$DSH_HOME/AGENTS.md"
+
+  install_skills "$repo_root/skills" "$AGENT_HOME/.agents/skills"
+  install_codex_review_skills "$codex_review" "$review_skills" "$AGENT_HOME/.agents/skills"
+
+  # The home-level patch, not a profile one: it applies after every bundle
+  # layer whatever the profile, so a profile created later still gets the rows.
+  install_deepseek_profile_rows "$repo_root" "$instructions_max_bytes" \
+    "$codex_review" "$teams"
+
+  if ! command -v dsh >/dev/null 2>&1; then
+    echo "  ! 'dsh' not on PATH — the installed rows stay inert until it is" >&2
+  fi
+}
+
+# Rewrite the rows this installer owns in the DSH patch layer:
+#   instructions — the user-global AGENTS.md budget, raised so the whole file
+#                  is injected; only while that file exists
+#   mcp-core     — code-skeleton, while its bin is on PATH
+#   commit-review — the review hook, with --codex-review
+#   teams        — the delegation authorization, with --teams
+#
+# A patch replaces the targeted row's whole config rather than merging into it,
+# so the instructions row restates the only key its bundle sets. An update row
+# whose entry the bundle tree does not have is skipped by dsh, which says so.
+#
+# The rows are built in a fixed order, so a re-install reproduces the file it
+# wrote the first time instead of shuffling the block.
+install_deepseek_profile_rows() {
+  local repo_root="$1"
+  local instructions_max_bytes="$2"
+  local codex_review="$3"
+  local teams="$4"
+  local patch="$DSH_HOME/cordis.patch.yml"
+
+  if [[ ! -f "$patch" ]]; then
+    printf '%s\n' \
+      '# Your patch layer for this dsh profile, applied after every bundle layer:' \
+      '# a top-level YAML array of loader patch entries (id-targeted config' \
+      '# overrides, disables, and insert lists; `!!js` expressions allowed).' \
+      '# An empty file is an empty list; a comment-only file is not.' > "$patch"
+    echo "  + created $patch"
+  fi
+
+  local owned
+  owned="$(_dsh_managed_ids "$patch")"
+  local insert_block="" update_block=""
+
+  local spec launch_command launch_args
+  if spec="$(mcp_launch_spec "code-skeleton-mcp" "code-skeleton-mcp" 2>/dev/null || true)" \
+     && [[ -n "$spec" ]]; then
+    launch_command="$(printf '%s' "$spec" | jq -r '.command')"
+    launch_args="$(printf '%s' "$spec" | jq -c '.args')"
+    if ! _dsh_has_id "$owned" mcp-core; then
+      insert_block+="    - id: mcp-code-skeleton
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: code-skeleton
+        transport: stdio
+        command: $(jq -rn --arg v "$launch_command" '$v | tojson')
+"
+      if [[ "$(printf '%s' "$launch_args" | jq 'length')" -gt 0 ]]; then
+        insert_block+="        args: $launch_args"$'\n'
+      fi
+      owned="$owned mcp-core"
+    fi
+  else
+    echo "  ! code-skeleton-mcp not on PATH; skip the MCP row" >&2
+  fi
+
+  if [[ -f "$DSH_HOME/AGENTS.md" ]] && ! _dsh_has_id "$owned" instructions; then
+    update_block+="- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: $instructions_max_bytes"$'\n'
+    owned="$owned instructions"
+  fi
+
+  if [[ "$codex_review" -eq 1 ]] && ! _dsh_has_id "$owned" commit-review; then
+    local hook
+    hook="$(native_path "$AGENT_HOME/.agents/hooks/deepseek-commit-review.sh")"
+    insert_block+="    - id: commit-review
+      name: '@deepseek-ai/dsh-user-approval/hooks'
+      config:
+        hooks:
+          PreToolUse:
+            - matcher: 'Bash|bash'
+              command: $(jq -rn --arg v "$hook" '$v | tojson')
+"
+    owned="$owned commit-review"
+  fi
+
+  if [[ "$teams" -eq 1 ]] && ! _dsh_has_id "$owned" teams; then
+    insert_block+="    - id: teams
+      name: '@deepseek-ai/dsh-system-prompt/persona'
+      config:
+        personaPrefix: >-
+          You are a coding agent. Delegation is a default execution mode: when
+          work splits into parts that do not block each other, start the parts
+          in parallel through the sub-agent tools without asking first. The
+          result you hand back is yours, including what an agent did for you.
+"
+    owned="$owned teams"
+  fi
+
+  _dsh_write_rows "$patch" "$owned" "$insert_block" "$update_block"
+}
+
+_dsh_has_id() {
+  local ids=" $1 "
+  [[ "$ids" == *" $2 "* ]]
+}
+
+# Print the ids of the rows this installer owns in <patch>, one per line.
+_dsh_managed_ids() {
+  awk -v open="managed rows start: $DSH_PATCH_MARKER" \
+      -v endline="# managed rows end: $DSH_PATCH_MARKER" '
+    $0 == open { inblock = 1; next }
+    $0 == endline { inblock = 0; next }
+    inblock && /^ *- id: / { sub(/^ *- id: ?/, ""); print }
+  ' "$1" 2>/dev/null
+}
+
+# Rewrite <patch> so its managed region carries exactly the rows named by
+# <owned_ids>: the <insert_block> rows mounted as one insert, then the
+# <update_block> rows patching entries the bundles already mount. An empty block
+# drops the rows it would have carried.
+#
+# The region is one contiguous run of lines at the end of the file, opened and
+# closed by marker comments, because that is the only way to own part of a YAML
+# list without rewriting the user's own entries. Everything above the opening
+# marker is copied byte for byte.
+_dsh_write_rows() {
+  local patch="$1"
+  local owned="$2"
+  local insert_block="$3"
+  local update_block="$4"
+  # The block owns everything from its header line down to its end marker,
+  # blank separator included, so a re-install strips what it wrote before.
+  local banner="# This block is written by scripts/install.sh of coding-agent-config."
+  local open="# managed rows start: $DSH_PATCH_MARKER"
+  local endline="# managed rows end: $DSH_PATCH_MARKER"
+
+  local tmp
+  tmp="$(mktemp)"
+  # A blank line is held back until the next line is known: one directly above
+  # the banner is the block separator and goes with the block, any other blank
+  # line the user wrote is printed where it was.
+  awk -v banner="$banner" -v open="$open" -v endline="$endline" '
+    $0 == banner || $0 == open {
+      skip = 1
+      held = 0
+      next
+    }
+    $0 == endline { skip = 0; next }
+    skip { next }
+    $0 == "" {
+      if (held) print ""
+      held = 1
+      next
+    }
+    {
+      if (held) print ""
+      held = 0
+      print
+    }
+    END { if (held) print "" }
+  ' "$patch" > "$tmp.keep"
+
+  # A comment-only file is not a valid (empty) patch list, so the part above
+  # the block is reduced to nothing rather than left holding comments alone.
+  if ! grep -qvE '^[[:space:]]*(#.*)?$' "$tmp.keep"; then
+    : > "$tmp.keep"
+  fi
+
+  if [[ -z "$insert_block" && -z "$update_block" ]]; then
+    # No rows to own. dsh requires a top-level array; comments alone parse as
+    # `null`, so a file with nothing else in it gets `[]`.
+    if ! grep -qvE '^[[:space:]]*(#.*)?$' "$tmp.keep" \
+       || [[ ! -s "$tmp.keep" ]]; then
+      printf '%s\n' '[]' > "$tmp.keep"
+    fi
+    if cmp -s "$tmp.keep" "$patch"; then
+      rm -f "$tmp" "$tmp.keep"
+      echo "  = $patch (up to date: no rows)"
+      return 0
+    fi
+    mv "$tmp.keep" "$patch"
+    rm -f "$tmp"
+    echo "  + $patch (no rows)"
+    return 0
+  fi
+
+  {
+    # The user part ends right before the block, so one blank line puts the
+    # block exactly where the previous install left it.
+    cat "$tmp.keep"
+    printf '%s\n' ""
+    printf '%s\n' "$banner"
+    printf '%s\n' "# Everything above it is yours and is never touched. The rows below are"
+    printf '%s\n' "# dropped again when the install stops asking for them."
+    printf '%s\n' "$open"
+    if [[ -n "$insert_block" ]]; then
+      printf '%s\n' "- insert:"
+      printf '%s\n' "${insert_block%$'\n'}"
+      if [[ -n "$update_block" ]]; then
+        # Update rows target entries the bundles mount, so they are list items
+        # of their own, next to the insert rather than inside it.
+        printf '%s\n' ""
+        printf '%s\n' "${update_block%$'\n'}"
+      fi
+    else
+      printf '%s\n' "${update_block%$'\n'}"
+    fi
+    printf '%s\n' "$endline"
+  } > "$tmp"
+  rm -f "$tmp.keep"
+
+  local rows=""
+  local id
+  for id in $owned; do
+    rows="${rows:+$rows, }$id"
+  done
+
+  if cmp -s "$tmp" "$patch"; then
+    rm -f "$tmp"
+    echo "  = $patch (up to date${rows:+: $rows})"
+    return 0
+  fi
+  mv "$tmp" "$patch"
+  echo "  + $patch${rows:+ ($rows)}"
 }
 
 # Install or drop the review skills under <target_root>. Symmetric with the

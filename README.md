@@ -1,7 +1,7 @@
 # coding-agent-config
 
-Portable coding-agent setup for Claude Code, Codex CLI / IDE and Cursor on
-macOS, Linux, and Windows.
+Portable coding-agent setup for Claude Code, Codex CLI / IDE, Cursor and
+DeepSeek Harness on macOS, Linux, and Windows.
 
 Single source of truth for universal coding rules and hooks. One script copies
 them into the per-user config locations of each agent and registers hooks in
@@ -30,12 +30,13 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 │   └── teams/          #   orchestration section, selected by --teams
 ├── build/              # generated, gitignored
 │   ├── AGENTS.md       #   flat file for Codex (built from CLAUDE.md + imports)
+│   ├── AGENTS.deepseek.md #   the same flat file, the copy the deepseek mode installs
 │   └── cursor/rules/   #   one .mdc per rule for Cursor (frontmatter + body)
 ├── tests/              # `bash tests/<name>.test.sh`, `python3 tests/<name>.test.py`
 └── scripts/
     ├── build.sh        # rebuild build/AGENTS.md
     ├── build-cursor.sh # rebuild build/cursor/rules/*.mdc
-    ├── install.sh      # copy into Claude/Codex/Cursor config locations
+    ├── install.sh      # copy into Claude/Codex/Cursor/DeepSeek config locations
     └── lib/
         ├── install-lib.sh      # reusable shell helpers (public extension surface)
         ├── platform.sh         # OS detection and path translation (sourced by install-lib)
@@ -52,14 +53,16 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
   install.sh installs it globally (`npm install -g agent-sdd`), then runs
   `sdd install <mode>` so agent-sdd installs its own rules, skill, and hooks.
 - **`hooks/`** — hook scripts. `code-navigation-reminder.sh` is registered
-  unconditionally; `codex-commit-review.sh` (Claude Code) and its Cursor entry
-  point `cursor-commit-review.sh` only with `--codex-review`.
+  unconditionally; `codex-commit-review.sh` (Claude Code) and its Cursor and
+  DeepSeek entry points (`cursor-commit-review.sh`,
+  `deepseek-commit-review.sh`) only with `--codex-review`.
 - **`skills/`** — SKILL.md bundles (open standard, supported by Claude Code,
   Codex CLI / IDE and Cursor alike). Each subdir is one skill and gets copied
   **per-skill** into `~/.claude/skills/<name>` and `~/.agents/skills/<name>`,
   so the user's own hand-rolled skills in those directories are left untouched.
   Cursor reads `~/.agents/skills` too, which is why the cursor mode installs
-  there instead of into a fourth copy. Currently empty — drop new skills here.
+  there instead of into a fourth copy; DeepSeek Harness reads it for the same
+  reason. Currently empty — drop new skills here.
 - **`codex-review/`** — the review bundle, installed only with `--codex-review`
   (into both `~/.claude/skills/` and `~/.agents/skills/`, removed without the
   flag). `code-review` holds the review policy; `codex-cli-review` holds the
@@ -90,7 +93,9 @@ git submodule and reuse `scripts/lib/install-lib.sh` (see
 expands at session start via `@rules/X.md` imports. Codex does not
 understand `@import` (it merges one instruction file per directory and nothing
 else), so `scripts/build.sh` produces a flattened `build/AGENTS.md` with all
-referenced files inlined. Cursor ignores plain `.md` in a rules directory, so
+referenced files inlined; the deepseek mode builds the same flat file a second
+time at `build/AGENTS.deepseek.md`, so the two never overwrite each other.
+Cursor ignores plain `.md` in a rules directory, so
 `scripts/build-cursor.sh` republishes each rule as `<name>.mdc` with
 `alwaysApply: true` frontmatter and the description taken from the same
 `CLAUDE.md` index line.
@@ -149,10 +154,11 @@ Windows-side installation, and vice versa. Pick one and install there.
 ```bash
 git clone <this-repo> ~/Projects/coding-agent-config
 cd ~/Projects/coding-agent-config
-./scripts/install.sh all                # universal rules + hooks, all three agents
+./scripts/install.sh all                # universal rules + hooks, all four agents
 ./scripts/install.sh all --sdd          # + Spec-Driven Development via agent-sdd
 ./scripts/install.sh all --lang=en      # pin replies to English (or ru)
 ./scripts/install.sh cursor             # Cursor only
+./scripts/install.sh deepseek           # DeepSeek Harness only
 ```
 
 ### Flags
@@ -162,8 +168,8 @@ cd ~/Projects/coding-agent-config
 | *(none)* | universal rules + `hooks/`. Agent uses built-in git knowledge. |
 | `--lang=ru\|en` | pin the agent's reply language. Omitted, the agent replies in the operator's own language; set, it always replies in Russian or English. |
 | `--sdd` | install the `agent-sdd` npm package globally, then run `sdd install <mode>`. agent-sdd installs its own rules, skill, and hooks. |
-| `--teams` | delegation-first setup: adds `rules/orchestration.md` to the generated `CLAUDE.md` / `AGENTS.md` and to the Cursor rule set, sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (omitted, the key is removed), and turns both Codex gates on in `~/.codex/config.toml` — `features.multi_agent` and `agents.enabled` (omitted, the config is left as-is). Cursor has no runtime gate to flip, so there it is the rule alone. See [Orchestration](#orchestration). |
-| `--codex-review` | install the `codex-review/` skills on every surface, write the trimmed `CODEX_HOME` the review runs in, and register the commit-review hook for Claude Code (`PreToolUse`) and Cursor (`beforeShellExecution`); Codex has no hook configuration to put it in. Omitted, all three are removed. See [Review cost](#review-cost). |
+| `--teams` | delegation-first setup: adds `rules/orchestration.md` to the generated `CLAUDE.md` / `AGENTS.md` and to the Cursor rule set, sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the `env` block of `~/.claude/settings.json` (omitted, the key is removed), turns both Codex gates on in `~/.codex/config.toml` — `features.multi_agent` and `agents.enabled` (omitted, the config is left as-is) — and adds a delegation persona row to the DeepSeek home patch (omitted, the row is removed). Cursor has no runtime gate to flip, so there it is the rule alone. See [Orchestration](#orchestration). |
+| `--codex-review` | install the `codex-review/` skills on every surface, write the trimmed `CODEX_HOME` the review runs in, and register the commit-review hook for Claude Code (`PreToolUse`), Cursor (`beforeShellExecution`) and DeepSeek Harness (`PreToolUse`, from the home patch); Codex has no hook configuration to put it in. Omitted, all of it is removed. See [Review cost](#review-cost). |
 | `--update-mcps` | update npm-backed MCP packages to `latest` without asking per package. |
 
 ### Targets
@@ -186,6 +192,10 @@ Windows.
 | Cursor | `$AGENT_HOME/.cursor/hooks.json` (mutated)  | `beforeShellExecution` entry with `--codex-review` |
 | Cursor | `$AGENT_HOME/.cursor/mcp.json` (mutated)    | `mcpServers.<name>`                   |
 | Cursor | `$AGENT_HOME/.agents/skills/<name>` (copied per skill) | shared with the Codex target above |
+| DeepSeek Harness | `${DSH_HOME:-$AGENT_HOME/.dsh}/AGENTS.md` (copied) | `build/AGENTS.deepseek.md`         |
+| DeepSeek Harness | `$AGENT_HOME/.agents/skills/<name>` (copied per skill) | `skills/<name>/`, plus `codex-review/skills/<name>/` with `--codex-review` |
+| DeepSeek Harness | `$AGENT_HOME/.agents/hooks` (copied) | `hooks/` (the review hook is pointed at from the patch) |
+| DeepSeek Harness | `${DSH_HOME:-$AGENT_HOME/.dsh}/cordis.patch.yml` (mutated) | `dsh-mcp-client` row for `code-skeleton`, `agent-instructions` budget, review hook and teams persona rows |
 | Codex CLI (review only) | `$AGENT_HOME/.cache/coding-agent-config/codex-review-home/` (generated) | `templates/review/rules.md` + `rules/`, with `--codex-review` |
 
 Codex reads `AGENTS.override.md` in preference to `AGENTS.md` at every level.
@@ -243,6 +253,7 @@ re-adds an entry for a script it already registered under a wider matcher.
 | `code-navigation-reminder.sh` | Claude Code | `PreToolUse` | `Grep\|Read` | always |
 | `codex-commit-review.sh` | Claude Code | `PreToolUse` | `Bash` | `--codex-review` |
 | `cursor-commit-review.sh` | Cursor | `beforeShellExecution` | — | `--codex-review` |
+| `deepseek-commit-review.sh` | DeepSeek Harness | `PreToolUse` | `Bash\|bash` | `--codex-review` |
 
 Cursor has no equivalent of the navigation reminder: a hook there can hand the
 agent a message only when it *refuses* the action, and `beforeReadFile` cannot
@@ -275,6 +286,11 @@ One script, two hook protocols, selected by `COMMIT_REVIEW_PROTOCOL`:
 - **Cursor** — entered through `cursor-commit-review.sh`, which sets the
   variable. `permission: "deny"` with the review in `agent_message`; Cursor
   delivers a hook message to the agent only on a refusal.
+- **DeepSeek Harness** — entered through `deepseek-commit-review.sh`, which
+  runs the Claude Code branch and re-emits its refusal unchanged: DSH shares
+  that envelope (`tool_name` / `tool_input` on stdin, `hookSpecificOutput`
+  with `permissionDecision` on stdout) and hands `permissionDecisionReason`
+  back to the agent as the reason.
 
 The review itself is the `codex-cli-review` skill: the hook writes the status and
 the staged plus unstaged diff into a scope file and calls
@@ -357,9 +373,39 @@ resolved).
 If `npm install -g` fails (no network, missing registry auth, etc.), the
 MCP is skipped with a warning rather than aborting the whole install.
 
+### DeepSeek Harness
+
+DSH has no separate config file for rules, MCP servers or hooks the way the
+other three do. It reads instructions from `$DSH_HOME/AGENTS.md` (and the
+project's own `AGENTS.md`), skills from `~/.agents/skills`, and everything else
+from a Cordis plugin tree composed of bundle patch layers. The deepseek mode
+therefore splits the install:
+
+- **Rules** are the flat `AGENTS.md` copied to `$DSH_HOME/AGENTS.md`. DSH loads
+  that file as the user-global baseline of every session, so a project without
+  its own `AGENTS.md`/`CLAUDE.md` still gets them.
+- **Skills** land in `~/.agents/skills`, the same root Codex and Cursor read.
+- **MCP, the review hook, the teams persona and the instructions budget** are
+  rows in the home-level patch `$DSH_HOME/cordis.patch.yml`, which applies on
+  top of every profile. `code-skeleton` is mounted through `dsh-mcp-client`,
+  the review hook through the `dsh-user-approval/hooks` row, the persona
+  through `dsh-system-prompt/persona`, and the budget by overriding
+  `agent-instructions.maxBytes` (192 KiB: DSH's 64 KiB default is sized for a
+  few files, and its own `AGENTS.md` is already more than half of it, so the
+  rules would be dropped from the prompt rather than truncated).
+
+That patch file is DSH's own, so the installer owns only the marked block at
+its end and never rewrites the rest: entries you wrote stay byte for byte, and
+re-running the install reproduces the same file. The rows appear and disappear
+with `--codex-review` and `--teams`, so dropping a flag removes its row.
+
+A row that mounts a plugin is always inserted; a row that targets an entry the
+profile's bundle tree does not have is skipped by `dsh`, which reports the
+missing id itself.
+
 ## Orchestration
 
-Both agents can run sub-agents, and both are conservative about it by default.
+Every agent can run sub-agents, and all are conservative about it by default.
 `--teams` flips two independent things: the runtime switch, and the standing
 authorization that makes the agent actually use it.
 
@@ -368,6 +414,7 @@ authorization that makes the agent actually use it.
 | Claude Code | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — a sub-agent that Claude names becomes a teammate: own session, own context, direct messaging, shared task list | `rules/orchestration.md`, imported from the generated `~/.claude/CLAUDE.md` |
 | Codex | `features.multi_agent` and `agents.enabled` — two independent gates, either one off keeps `spawn_agent` away from the model. Both ship on, so this only undoes a deliberate opt-out | the same rule, inlined into `~/.codex/AGENTS.md` |
 | Cursor | nothing to flip — sub-agents need no config gate | the same rule, published as `~/.cursor/rules/orchestration.mdc` |
+| DeepSeek Harness | nothing to flip — the `subagent` tools are on by default | a `dsh-system-prompt/persona` row in the home patch: the deployment persona states the standing delegation authorization |
 
 The authorization half is not decoration. Codex ships this in the description
 of its `spawn_agent` tool:
@@ -407,18 +454,19 @@ remove the stale global package first if you need to force a downgrade).
 ./scripts/install.sh claude [--sdd] [--teams] [--codex-review] [--lang=ru|en]
 ./scripts/install.sh codex  [--sdd] [--teams] [--codex-review] [--lang=ru|en]  # only Codex (also runs build)
 ./scripts/install.sh cursor [--teams] [--codex-review] [--lang=ru|en]          # only Cursor (also runs build-cursor)
+./scripts/install.sh deepseek [--teams] [--codex-review] [--lang=ru|en]        # only DeepSeek Harness (also runs build)
 ./scripts/install.sh all    [--sdd] [--teams] [--codex-review] [--lang=ru|en]
 ```
 
-`--sdd` has no cursor target: `agent-sdd` installs for claude and codex only,
-and the cursor mode says so instead of failing.
+`--sdd` has no cursor or deepseek target: `agent-sdd` installs for claude and
+codex only, and those modes say so instead of failing.
 
 ## Adding a new skill
 
 Drop `skills/<name>/SKILL.md` (plus any supporting files) into the repo, then
 re-run `./scripts/install.sh all`. Per-skill copies land in
-`~/.claude/skills/<name>` and `~/.agents/skills/<name>` (which Cursor reads as
-well). Skills are
+`~/.claude/skills/<name>` and `~/.agents/skills/<name>` (which Cursor and
+DeepSeek Harness read as well). Skills are
 auto-discovered from `skills/*/` — no flag, no list to maintain. The
 `codex-review/skills/*/` bundle is the exception: it is discovered the same way
 but only when `--codex-review` is passed.
@@ -432,11 +480,13 @@ are untouched. A same-name collision is backed up to
 Drop `hooks/<name>.sh`, then add an `install_hook` call in `install_claude`
 in `scripts/install.sh`, or an `install_cursor_hook` call in `install_cursor`.
 
-The two harnesses do not share a hook protocol: Claude Code passes
+The harnesses do not all share a hook protocol: Claude Code passes
 `tool_name` / `tool_input` and reads `hookSpecificOutput`, Cursor passes the
 event's own fields and reads `permission` / `agent_message`, and its event
-names are different too. A hook meant for both handles both envelopes, the way
-`codex-commit-review.sh` does.
+names are different too. DeepSeek Harness takes Claude Code's input and output
+shape, but its hooks live in the patch layer rather than in a `settings.json`.
+A hook meant for several of them handles each envelope, the way
+`codex-commit-review.sh` and its `cursor-` / `deepseek-` entry points do.
 
 Hook registration is idempotent — re-running install replaces the entry this
 repo owns (see [Hooks](#hooks) for what counts as owned) and leaves a same-name
@@ -455,7 +505,8 @@ this install should:
    `install_hook`, `install_cursor_hook`, `install_skills`,
    `install_permission_rules`, `install_teams_env`, `install_codex_subagents`,
    `install_codex_review_hook`, `install_cursor_review_hook`,
-   `install_codex_review_skills`, `build_cursor_rules`, `teams_section`,
+   `install_codex_review_skills`, `install_deepseek`, `build_cursor_rules`,
+   `teams_section`,
    `ensure_mcp_npm_global`, `ensure_agent_sdd`, `mcp_launch_spec`,
    `register_mcp_claude`, `register_mcp_codex`, `register_mcp_cursor`,
    `register_core_mcp_claude`, `register_core_mcp_codex`,
@@ -487,6 +538,8 @@ header and remain backwards-compatible across patch releases.
   `features.multi_agent` (written by `codex features enable`) and
   `agents.enabled`. Everything else, including `[agents.<name>]` role
   declarations, is left untouched.
+- Your own entries in `$DSH_HOME/cordis.patch.yml` — the installer writes
+  only the block it marks at the end of that file and never rewrites the rest.
 - Permissions in `~/.claude/settings.json` (`allow`/`deny`/`ask`) — this
   install.sh mutates only the `hooks` block and, with `--teams`, the `env`
   block. The `install_permission_rules` helper exists for downstream repos

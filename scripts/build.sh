@@ -2,13 +2,17 @@
 # Build a flat AGENTS.md for Codex by inlining @rules/*.md references from
 # CLAUDE.md.
 #
-# Usage: build.sh [--lang=ru|en] [--teams]
+# Usage: build.sh [--out=<file>] [--lang=ru|en] [--teams]
+#
+# --out   Where to write the flat file. Defaults to build/AGENTS.md; the
+#         deepseek mode builds its own copy at build/AGENTS.deepseek.md, so the
+#         Codex file that `install.sh codex` copies is never overwritten by it.
 #
 # --lang  Pin the reply language appended to the flat file. Defaults to the
 #         operator's own language when omitted.
 #
-# --teams Inline rules/orchestration.md, the standing authorization Codex needs
-#         before it will spawn sub-agents on its own.
+# --teams Inline rules/orchestration.md, the standing authorization Codex and
+#         DSH need before they will spawn sub-agents on their own.
 #
 # Source of truth: <repo>/CLAUDE.md, <repo>/rules/*.md,
 #                  <repo>/templates/{language,teams}/*.md.
@@ -23,11 +27,17 @@ source "$REPO_ROOT/scripts/lib/install-lib.sh"
 
 LANG_MODE=default
 TEAMS=0
+OUT="$REPO_ROOT/build/AGENTS.md"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --lang=*)
       LANG_MODE="${1#--lang=}"
       case "$LANG_MODE" in default|ru|en) ;; *) echo "build.sh: invalid --lang: $LANG_MODE" >&2; exit 2 ;; esac
+      shift
+      ;;
+    --out=*)
+      OUT="${1#--out=}"
+      [[ -n "$OUT" ]] || { echo "build.sh: --out needs a path" >&2; exit 2; }
       shift
       ;;
     --teams) TEAMS=1; shift ;;
@@ -36,15 +46,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 SRC="$REPO_ROOT/CLAUDE.md"
-OUT_DIR="$REPO_ROOT/build"
-OUT="$OUT_DIR/AGENTS.md"
 
 if [[ ! -f "$SRC" ]]; then
   echo "build.sh: source not found: $SRC" >&2
   exit 1
 fi
 
-mkdir -p "$OUT_DIR"
+mkdir -p "$(dirname "$OUT")"
 
 SOURCE="$SRC"
 if [[ "$TEAMS" -eq 1 ]]; then
