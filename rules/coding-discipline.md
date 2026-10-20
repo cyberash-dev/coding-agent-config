@@ -14,7 +14,8 @@ Don't assume. Don't hide confusion. Surface tradeoffs.
 - Don't guess APIs, versions, flags, commit SHAs, or package names.
   Verify by reading the code or docs before asserting. Don't trust a name
   either: open the import or definition before acting on it (a class called
-  `...V1` may live in `v2.py`).
+  `...V1` may live in `v2.py`). The same holds for a reviewer's finding: trace
+  it in the code before changing anything because of it.
 - Find where the needed value already lives before building a way to get it.
   Trace who produces it today, where it is stored, and who reads it. Ask
   whether the task needs a new state or just a value that already exists.
