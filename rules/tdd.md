@@ -4,8 +4,8 @@ Tests come before the code that makes them pass. Loop: **Red → Green → Refac
 one behavior at a time. Don't pile multiple failing tests before writing code.
 
 This file is about *when and how* to write the test relative to the code.
-For test structure (AAA, what to mock, fixtures vs parametrization) see
-`testing.md`.
+Every test written here follows `testing.md` (structure, mocking, no
+fixtures, determinism); on any conflict, `testing.md` wins.
 
 ## Red — write a failing test
 
@@ -75,7 +75,9 @@ Pick one strategy per task; state the choice if it's non-obvious.
 
 - **Test-after** ("test-validated development"). The test must have been red
   against absent behavior. A test written after the code only confirms what
-  already works — it doesn't drive design.
+  already works — it doesn't drive design. For a test on code that already
+  exists (legacy, inherited changes), apply `testing.md` → Prove the test can
+  fail.
 - **Going green by weakening assertions or deleting the test.** If a test no
   longer makes sense, replace it with one that does and explain why; never
   drop coverage silently to ship.
@@ -91,5 +93,6 @@ Pick one strategy per task; state the choice if it's non-obvious.
   to claim TDD. The test must drive a design decision, not rubber-stamp one.
 - **Mixing cycles in one commit.** Red, Green, and Refactor are three
   separate disciplines. Either commit each phase, or commit one full
-  Red→Green pair without smuggling refactor noise into it.
+  Red→Green pair without smuggling refactor noise into it. A Red commit
+  may carry a failing test locally; everything is green before push.
 

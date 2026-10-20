@@ -41,3 +41,7 @@ Casting (`as`) and non-null bangs are the type-level equivalent of swallowing an
 exception (see `errors.md`): they paper over a state the types say is possible.
 Validate at the boundary, narrow honestly, and let the type system surface the
 case you'd otherwise assert away.
+
+## Comments
+- Use the block form `/* */`, not `//` line comments.
+- A comment stays within 4 lines (the shared ESLint config caps it).

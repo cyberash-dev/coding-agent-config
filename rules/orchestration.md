@@ -38,6 +38,10 @@ into parts that do not block each other:
   back, and the write scope the agent owns. Agents do not inherit your
   conversation.
 - One concrete deliverable per agent. "Explore the codebase" is not a task.
+- An implementation brief opens with an approach check: confirm the
+  prescribed path is needed and look for an existing mechanism that already
+  does the job. If a simpler path exists, the agent stops and reports
+  instead of building.
 - Spawn the whole independent set in one round, then continue with local work
   that does not overlap it. Do not wait unless the critical path needs the
   result now.
@@ -53,8 +57,7 @@ into parts that do not block each other:
   cannot be made disjoint, it is one task, not two.
 - **Bounded fan-out.** 3-5 agents covers almost every task. More agents means
   more coordination and more tokens, not more throughput.
-- **Say what you delegated.** Name the agents and their scopes in your answer,
-  and say what you dropped if you narrowed the fan-out.
+- **Say what you delegated.** Name the agents and their scopes in your answer.
 
 ## Harness mapping
 

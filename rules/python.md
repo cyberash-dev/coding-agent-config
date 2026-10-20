@@ -12,7 +12,6 @@
   - Domain types (e.g. `UserId`, `Money`) instead of primitives
 
 ## Pytest
-- If a fixture is passed to a test but **not used** in the test body, use
-  `@pytest.mark.usefixtures("fixture_name")` instead of adding it as a parameter
+- No pytest fixtures and no `conftest.py` setup (see `testing.md`)
 - Prefer parametrization (`@pytest.mark.parametrize`) over loops inside tests
 - One behavioral aspect per test — split rather than assert many things at once

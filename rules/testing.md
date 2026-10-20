@@ -1,9 +1,9 @@
 # Testing
 
 ## Structure
-- **AAA**: Arrange / Act / Assert — separate the three phases visually
-  (blank lines or comments) so a reader sees what's set up, what's exercised,
-  and what's checked
+- **AAA**: Arrange / Act / Assert — separate the three phases with blank
+  lines (never `# Arrange`-style marker comments) so a reader sees what's set
+  up, what's exercised, and what's checked
 - One behavioral aspect per test. If a test name contains "and", it probably
   should be two tests
 - Test names describe **observable behavior**, not implementation:
@@ -48,21 +48,15 @@
 
 ## No fixtures, no setUp/tearDown
 - **Do not use fixtures, `setUp`/`tearDown`, or `conftest`-level shared
-  setup.** Every test constructs its own state inline. A reader sees the
-  full Arrange phase in the test body, not scattered across files
-- Repetition in setup is preferable to hidden context. Three similar tests
-  that each build their object explicitly beat three terse tests sharing a
-  fixture you have to chase down
-- If construction is genuinely noisy, extract a **plain function** with an
-  explicit name (`a_user_with_balance(100)`) and call it from Arrange.
-  Functions are honest — fixtures rely on framework magic and ordering
+  setup**, even where the project already uses them. Every test builds its
+  state in its own Arrange phase, not scattered across files
+- Setup repeated across tests goes into a **plain function** with an
+  explicit name (`a_user_with_balance(100)`), called from Arrange. Functions
+  are honest — fixtures rely on framework magic and ordering
 - No constants or test-data modules shared between tests either. A literal
   reused across tests is hidden context: each test states its own inputs
 - Use **parametrization** when the same test logic runs against many
   inputs — do not loop inside a test
-- Exception: if the project already uses fixtures pervasively, match the
-  surrounding style (per `coding-discipline.md` → Surgical Changes); flag
-  the divergence rather than mass-rewriting
 
 ## Test code quality
 - Test code is production-grade. Same bar for naming, duplication, and

@@ -5,13 +5,27 @@ speed. Use judgment for trivial work.
 
 ## Think Before Coding
 Don't assume. Don't hide confusion. Surface tradeoffs.
-- State assumptions explicitly. Ask only when the work cannot be done correctly
-  without the answer: stop, name what's confusing, ask. Otherwise state the
+- On ambiguity, first try to resolve it yourself from the code, docs, and
+  history. If it still needs the user's decision, ask right away, before
+  implementing: the earlier it is resolved, the cheaper. Otherwise state the
   assumption and continue.
 - If multiple interpretations exist, present them — don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
 - Don't guess APIs, versions, flags, commit SHAs, or package names.
-  Verify by reading the code or docs before asserting.
+  Verify by reading the code or docs before asserting. Don't trust a name
+  either: open the import or definition before acting on it (a class called
+  `...V1` may live in `v2.py`).
+- Find where the needed value already lives before building a way to get it.
+  Trace who produces it today, where it is stored, and who reads it. Ask
+  whether the task needs a new state or just a value that already exists.
+  Build a new channel (event consumer, poller, cross-service call) only after
+  proving no existing source has it.
+- Examine any existing mechanism the task itself names, even in its caveats,
+  before writing code. It may already be the solution.
+- A task brief states the outcome, not the method. When the prescribed method
+  needs new infrastructure, a change in code another team owns, a data
+  migration, or an access request, stop and look for a simpler path, and show
+  the user the choice before coding.
 - Prove claims about existing behaviour or data flow. When you assert a
   behaviour is already on the main branch, or that a value reaches an
   endpoint/consumer, cite the exact commit or `file:line` and back an end-to-end
@@ -27,7 +41,8 @@ Don't assume. Don't hide confusion. Surface tradeoffs.
 ## Simplicity First
 Minimum code that solves the problem. Nothing speculative.
 - No features beyond what was asked.
-- No abstractions for single-use code.
+- No abstractions for single-use code, unless another rule requires the split
+  (one function, one responsibility; size caps; linter limits).
 - No "flexibility" or "configurability" that wasn't requested.
 - No error handling for impossible scenarios.
 - Use the minimal base/abstraction the work needs — don't inherit a heavier base
@@ -39,6 +54,10 @@ Minimum code that solves the problem. Nothing speculative.
   concerns (parsing, validation, assembly, I/O) into separate, independently
   testable helpers — even when it is under the line cap.
 - If you write 200 lines and it could be 50, rewrite it.
+- Check the plan's size before coding. If it touches more than one service or
+  team, adds infrastructure, or spans far more files than the core change,
+  write a short note on why it is needed and whether a simpler path exists,
+  and show it to the user first.
 
 Hard size caps (enforced mechanically by the shared ESLint config; exceeding one
 means split or refactor, never raise the limit):
@@ -53,33 +72,37 @@ Touch only what you must. Clean up only your own mess.
 - Don't "improve" adjacent code, comments, or formatting.
 - Don't refactor things that aren't broken.
 - Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it — don't delete it.
+- Delete dead code you come across, pre-existing included, once it is proven
+  unused (no references, not part of a public API). Put the deletion in its
+  own commit (`commits.md` → Granularity) and don't report it in the answer.
 - Don't rewrite existing test bodies when the task didn't ask for it — adding new
   test cases is fine, but leave the bodies of tests you weren't asked to touch as
   they were.
 
 When your changes create orphans:
 - Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
 
-Test: every changed line should trace directly to the user's request.
+Test: every changed line should trace directly to the user's request or to
+dead-code removal.
 
 ## Self-Documenting Code
 Code should explain itself through clear names and structure. Comments are a
 last resort, not a default.
 - No comments that describe WHAT the code does — well-named identifiers do that.
-- No comments restating the obvious, marking sections, or narrating changes
-  ("added for X", "used by Y", "fixes bug Z") — that belongs in commit messages.
+- No comments restating the obvious, marking sections (`# Arrange`,
+  `// --- helpers ---`), or narrating changes ("added for X", "used by Y",
+  "fixes bug Z") — that belongs in commit messages. This holds everywhere,
+  tests included: separate blocks with blank lines.
 - No docstrings or block comments on trivial functions.
 - Tests get the same rule — no narrating comments in test bodies. Strip the
   explanatory comments YOU added; leave pre-existing comments you did not add
   (removing those is an out-of-scope edit — see Surgical Changes).
 - No code snippets or usage examples inside comments — those belong in tests
   or external docs.
-- Use the block form `/* */`, not `//` line comments.
-- Keep any surviving comment short: a few lines of prose at most (the shared
-  ESLint config caps it at 4). Needing more means the code wants restructuring,
-  not a longer comment.
+- Comment syntax and length limits are language-specific and follow the
+  project's linter config (see the language files, e.g. `typescript.md`).
+- Keep any surviving comment short: a few lines of prose at most. Needing more
+  means the code wants restructuring, not a longer comment.
 - If a comment feels needed, first try: better name, smaller function,
   extracted variable. Comment only if those don't resolve the confusion.
 

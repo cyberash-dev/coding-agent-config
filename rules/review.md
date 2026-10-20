@@ -3,7 +3,8 @@
 Run through this list before presenting changes or committing.
 
 ## Scope
-- [ ] Every changed line traces directly to the user's request
+- [ ] Every changed line traces directly to the user's request, or removes
+      proven-dead code in its own commit
 - [ ] No "while I was here" refactors, formatting tweaks, or comment polish
 - [ ] No new abstractions that aren't used at least twice
 - [ ] No speculative configurability, flags, or hooks
@@ -28,7 +29,8 @@ Run through this list before presenting changes or committing.
 ## Tests
 - [ ] New behavior has a test; bug fix has a regression test
 - [ ] Tests follow `testing.md` (AAA, no internal mocks, descriptive names)
-- [ ] All tests pass locally
+- [ ] All tests pass locally before push (a local Red commit may carry a
+      failing test)
 
 ## Errors
 - [ ] No swallowed exceptions, no fallbacks for impossible states
