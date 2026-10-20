@@ -15,6 +15,9 @@ How responses read for the user. Distinct from code style (see
   else!"). Open with the answer, end when the answer ends.
 - State results and decisions directly; don't narrate internal
   deliberation.
+- No contrast against an alternative nobody proposed ("X, not Y",
+  "based on the code, not from memory"). Negating an unraised option
+  adds nothing and implies it applied elsewhere. Just state X.
 
 ## Formatting
 - No emojis unless the user explicitly asks.
